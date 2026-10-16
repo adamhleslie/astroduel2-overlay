@@ -1,0 +1,7 @@
+# CMake build tree
+/build/
+*.user
+*.obj
+*.exp
+*.lib
+*.log

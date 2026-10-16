@@ -1,0 +1,6 @@
+# CRLF line endings for all text in this repo (Windows-side development)
+* text=auto eol=crlf
+*.png binary
+*.ttf binary
+*.ccz binary
+*.c3b binary
