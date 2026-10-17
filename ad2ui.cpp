@@ -347,6 +347,7 @@ static uintptr_t PoolHook(long long* mgr)
 
 static void InstallOpenLogHook();   /* fwd (defined below) */
 static void InstallPathBuilderHook(); /* fwd (defined below) */
+static void InstallMatchStartHook();  /* fwd (defined below) */
 
 static void PoolInstallWorker()
 {
@@ -356,6 +357,7 @@ static void PoolInstallWorker()
         Log("poolhook: not installed (%s)", s_tp_note[0] ? s_tp_note : "unknown");
     InstallOpenLogHook();
     InstallPathBuilderHook();
+    InstallMatchStartHook();
 }
 
 /* ---- inline log hook on FUN_140445388 (the engine's fopen wrapper) ----
@@ -531,6 +533,100 @@ static void InstallPathBuilderHook()
     VirtualProtect(page, 4096, oldProt, &dummy);
     InterlockedExchange(&s_pb_hook_on, 1);
     Log("pathbuild: INSTALLED entry=%p tp=%p (call PathHook, rerun prologue, jmp -> %p)",
+        (void*)entry, (void*)tp, (void*)cont);
+}
+
+/* ---- inline hook on FUN_14026cce0 (versus match level-setup) ----
+
+   THE level-pool override. Call chain (xref-verified):
+     FUN_14026bf20/FUN_14026b9c0 -> FUN_14026d080 (picker: random walk over a
+       per-object int array at mgr+0x158..0x160, avoiding repeats, bound by
+       max-level global DAT_1405de56c; result -> mgr+0x114)
+     -> FUN_14026cce0(mgr):  iVar13 = *(int*)(mgr + 0x114);
+                              FUN_14026c1c0(out, DAT_1405de550 [world], iVar13, 0);
+                              ... load map ...
+   i.e. mgr+0x114 is read exactly once here, right before the path is built.
+   Overriding it at entry makes the game load the committed pool's pick.
+   World id comes from the global DAT_1405de550 (base+0x5de550).
+
+   Steal design: the first 20 bytes are the four shadow-register stores
+   (mov [rsp+8],rbx; mov [rsp+0x10],rbp; mov [rsp+0x18],rsi;
+    mov [rsp+0x20],rdi -- capstone-verified, no RIP-relative insns), so the
+   trampoline can rerun an exact copy of them at entry_rsp and jmp to
+   0x14026ccf4 (push r14; sub rsp,0xa0; cookie load) with rsp == entry_rsp.
+   All four args are saved below the return address and restored.
+
+   Entry bytes: 48 89 5c 24 08 | 48 89 6c 24 10 | 48 89 74 24 18 | 48 89 7c 24 20
+   (resume at 0x14026ccf4 after the stolen 20 B) */
+static volatile LONG s_ms_hook_on = 0;
+static BYTE* s_msp_buf = nullptr;
+
+static void MatchStartHook(long long* mgr)
+{
+    if (!mgr || !s_module_base) return;
+    int world = *(int*)(s_module_base + 0x5de550);   /* DAT_1405de550 */
+    int orig  = *(int*)((char*)mgr + 0x114);
+    const PoolCfg* p = (world >= 1 && world < POOL_WORLD_MAX) ? &s_pools[world] : nullptr;
+    if (p && p->count > 0) {
+        int lvl = p->items[rand() % p->count];
+        *(int*)((char*)mgr + 0x114) = lvl;
+        Log("matchstart: world=%d(%s) orig=%d -> OVERRIDE %d (committed pool of %d)",
+            world, PoolWorldName(world), orig, lvl, p->count);
+    } else {
+        Log("matchstart: world=%d(%s) level=%d (no committed pool -- untouched)",
+            world, PoolWorldName(world), orig);
+    }
+}
+
+static void InstallMatchStartHook()
+{
+    if (!s_module_base) return;
+    const uintptr_t kEntry = 0x26cce0;             /* 0x14026cce0 - image base */
+    const uintptr_t kCont  = 0x26ccf4;             /* resume after stolen 20 B */
+    const BYTE want[20] = { 0x48,0x89,0x5C,0x24,0x08, 0x48,0x89,0x6C,0x24,0x10,
+                            0x48,0x89,0x74,0x24,0x18, 0x48,0x89,0x7C,0x24,0x20 };
+    uint8_t* entry = (uint8_t*)(s_module_base + kEntry);
+    if (memcmp(entry, want, 20) != 0) {
+        Log("matchstart: prologue mismatch (%02x %02x %02x .. %02x %02x %02x) -- REFUSED",
+            entry[0], entry[1], entry[2], entry[17], entry[18], entry[19]);
+        return;
+    }
+    BYTE* tp = (BYTE*)VirtualAlloc(nullptr, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    if (!tp) { Log("matchstart: VirtualAlloc failed"); return; }
+
+    /* trampoline (rsp is entry_rsp, %16==8, [rsp]=retaddr on entry) */
+    tp[0x00]=0x48; tp[0x01]=0x81; tp[0x02]=0xEC; tp[0x03]=0x38; tp[0x04]=0; tp[0x05]=0; tp[0x06]=0;  /* sub rsp,0x38 (->%16==0) */
+    tp[0x07]=0x48; tp[0x08]=0x89; tp[0x09]=0x4C; tp[0x0a]=0x24; tp[0x0b]=0x30;                       /* mov [rsp+0x30], rcx */
+    tp[0x0c]=0x48; tp[0x0d]=0x89; tp[0x0e]=0x54; tp[0x0f]=0x24; tp[0x10]=0x28;                       /* mov [rsp+0x28], rdx */
+    tp[0x11]=0x49; tp[0x12]=0x89; tp[0x13]=0x44; tp[0x14]=0x24; tp[0x15]=0x20;                       /* mov [rsp+0x20], r8  */
+    tp[0x16]=0x4C; tp[0x17]=0x89; tp[0x18]=0x4C; tp[0x19]=0x24; tp[0x1a]=0x18;                       /* mov [rsp+0x18], r9  */
+    int32_t relcall = (int32_t)((intptr_t)MatchStartHook - (intptr_t)(tp + 0x1b + 5));
+    tp[0x1b]=0xE8; memcpy(tp + 0x1c, &relcall, 4);                                                  /* call MatchStartHook */
+    tp[0x20]=0x48; tp[0x21]=0x8B; tp[0x22]=0x4C; tp[0x23]=0x24; tp[0x24]=0x30;                       /* mov rcx, [rsp+0x30] */
+    tp[0x25]=0x48; tp[0x26]=0x8B; tp[0x27]=0x54; tp[0x28]=0x24; tp[0x29]=0x28;                       /* mov rdx, [rsp+0x28] */
+    tp[0x2a]=0x49; tp[0x2b]=0x8B; tp[0x2c]=0x44; tp[0x2d]=0x24; tp[0x2e]=0x20;                       /* mov r8,  [rsp+0x20] */
+    tp[0x2f]=0x4C; tp[0x30]=0x8B; tp[0x31]=0x4C; tp[0x32]=0x24; tp[0x33]=0x18;                       /* mov r9,  [rsp+0x18] */
+    tp[0x34]=0x48; tp[0x35]=0x81; tp[0x36]=0xC4; tp[0x37]=0x38; tp[0x38]=0; tp[0x39]=0; tp[0x3a]=0;  /* add rsp, 0x38 (->entry_rsp) */
+    int32_t relorig = (int32_t)(0x50 - (0x3b + 5));                                                 /* jmp ORIG20 (0x50) */
+    tp[0x3b]=0xE9; memcpy(tp + 0x3c, &relorig, 4);
+    memcpy(tp + 0x50, want, 20);                                                                    /* ORIG20: the 4 shadow stores */
+    uintptr_t cont = s_module_base + kCont;
+    tp[0x64]=0x48; tp[0x65]=0xB8; memcpy(tp + 0x66, &cont, 8);                                       /* mov rax, 0x...ccf4 */
+    tp[0x6e]=0xFF; tp[0x6f]=0xE0;                                                                    /* jmp rax           */
+    s_msp_buf = tp;
+
+    DWORD oldProt = 0;
+    uint8_t* page = (uint8_t*)((uintptr_t)entry & ~0xFFFULL);
+    if (!VirtualProtect(page, 4096, PAGE_READWRITE, &oldProt)) {
+        Log("matchstart: VirtualProtect failed: %lu", GetLastError()); return;
+    }
+    /* entry patch: mov rax, imm64(tp) ; jmp rax  (12 bytes; rest stays untouched) */
+    entry[0]=0x48; entry[1]=0xB8; memcpy(entry + 2, &tp, 8);
+    entry[10]=0xFF; entry[11]=0xE0;
+    DWORD dummy = 0;
+    VirtualProtect(page, 4096, oldProt, &dummy);
+    InterlockedExchange(&s_ms_hook_on, 1);
+    Log("matchstart: INSTALLED entry=%p tp=%p (override mgr+0x114, rerun prologue, jmp -> %p)",
         (void*)entry, (void*)tp, (void*)cont);
 }
 
@@ -1068,6 +1164,15 @@ static void PoolHookVerifyTick()
             Log("openlog: !!! ENTRY BYTES CORRUPTED (%02x %02x .. %02x %02x) -- hook dead",
                 entry[0], entry[1], entry[10], entry[11]);
             InterlockedExchange(&s_open_hook_on, 0);
+        }
+    }
+    if (s_ms_hook_on && s_module_base) {
+        uint8_t* entry = (uint8_t*)(s_module_base + 0x26cce0);
+        if (entry[0] != 0x48 || entry[1] != 0xB8 ||
+            memcmp(entry + 2, &s_msp_buf, 8) != 0 || entry[10] != 0xFF || entry[11] != 0xE0) {
+            Log("matchstart: !!! ENTRY BYTES CORRUPTED (%02x %02x .. %02x %02x) -- hook dead",
+                entry[0], entry[1], entry[10], entry[11]);
+            InterlockedExchange(&s_ms_hook_on, 0);
         }
     }
 }
