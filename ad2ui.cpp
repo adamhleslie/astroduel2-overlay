@@ -10,6 +10,14 @@
  *   written outside the chosen index field (+0x380). A watchdog re-verifies
  *   the 12-byte entry patch and logs corruption (e.g. VMP rewrites).
  *
+ *   A second log-only inline hook on the engine's fopen wrapper
+ *   FUN_140445388 (0x140445388, 24-byte trampoline, rdx/r8 saved across
+ *   the call) logs every file the game opens -- the .tmx / *_data.xml
+ *   loads go through CRT fopen, which bypasses the kernel32 IAT hooks, so
+ *   this is the only ground truth for the real level-load path. Plus the
+ *   kernel32/shell32 file-API IAT hooks (dir scans, mkdirs, interesting
+ *   opens). All diagnostics -> %LOCALAPPDATA%\AstroDuel2Mod\probe_ui.log.
+ *
  * Injection / render strategy (unchanged from milestone 1):
  *   - Injected into the Steam-launched game at main menu (inject.exe).
  *   - Worker thread (DllMain-spawned) waits for the game to settle, then
@@ -337,12 +345,88 @@ static uintptr_t PoolHook(long long* mgr)
     return ret;
 }
 
+static void InstallOpenLogHook();   /* fwd (defined below) */
+
 static void PoolInstallWorker()
 {
     if (GetCurrentDirectoryA((DWORD)sizeof s_cwd, s_cwd))
         Log("poolhook: game CWD = %s", s_cwd);
     if (!InstallPoolHook())
         Log("poolhook: not installed (%s)", s_tp_note[0] ? s_tp_note : "unknown");
+    InstallOpenLogHook();
+}
+
+/* ---- inline log hook on FUN_140445388 (the engine's fopen wrapper) ----
+
+   Ground truth for WHICH files the game actually opens: the versus .tmx
+   and *_data.xml loads go through this wrapper (CRT fopen), which bypasses
+   every kernel32 IAT hook, so the file-API IAT log alone is blind to them.
+
+   ABI: OpenHook(void* this, const char* path, byte flags) -> handle.
+   Entry prologue (24 B, ends exactly at 0x1404453a4):
+     push rbx / sub rsp,0x20 / mov eax,r8d / xor ecx,ecx / and al,3 /
+     mov rbx,rdx / cmp al,1 / jne
+   The body after entry+24 still reads r8b (mode select) and re-reads the
+   path (from rbx, and rdx), and LogHook is a callee that clobbers the
+   volatile rdx/r8, so both are saved across the call in the prologue's
+   own 0x20 scratch: rsp+0x10 = rdx, rsp+0x18 = r8.
+   Trampoline: <24 B copy> save rdx/save r8 / call OpenHook /
+   restore rdx/restore r8 / jmp entry+24.  Stack at the call: rsp = 0 mod16
+   (the copied prologue left it there), so the callee gets 8 mod16. */
+static volatile LONG s_open_hook_on = 0;
+static BYTE* s_otp_buf = nullptr;
+static void OpenHook(const char* path, int flags);
+
+static void InstallOpenLogHook()
+{
+    if (!s_module_base) return;
+    const uintptr_t kEntry = 0x445388, kCont = 0x4453a4;
+    const BYTE want[24] = { 0x53, 0x48,0x83,0xEC,0x20, 0x48,0x89,0xC8, 0x31,0xC9,
+                            0x24,0x03, 0x48,0x89,0xD3, 0x3C,0x01, 0x0F,0x85 };
+    uint8_t* entry = (uint8_t*)(s_module_base + kEntry);
+    if (memcmp(entry, want, 24) != 0) {
+        Log("openlog: prologue mismatch (%02x %02x %02x .. %02x %02x %02x) -- REFUSED",
+            entry[0], entry[1], entry[2], entry[21], entry[22], entry[23]);
+        return;
+    }
+    BYTE* tp = (BYTE*)VirtualAlloc(nullptr, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    if (!tp) { Log("openlog: VirtualAlloc failed"); return; }
+
+    memcpy(tp, entry, 24);                          /* +0x00 24 B prologue copy */
+    int32_t rel = (int32_t)((intptr_t)OpenHook - (intptr_t)(tp + 41));
+    uint8_t rdx = 0x10, r8 = 0x18;                  /* scratch slots (rsp+0x10/0x18) */
+    tp[24] = 0x48; tp[25] = 0x89; tp[26] = 0x54; tp[27] = rdx;   /* mov [rsp+0x10], rdx */
+    tp[28] = 0x41; tp[29] = 0x89; tp[30] = 0x44; tp[31] = r8;    /* mov [rsp+0x18], r8  */
+    tp[32] = 0xE8; memcpy(tp + 33, &rel, 4);                        /* call OpenHook    */
+    tp[36] = 0x48; tp[37] = 0x8B; tp[38] = 0x54; tp[39] = rdx;     /* mov rdx, [rsp+0x10] */
+    tp[40] = 0x41; tp[41] = 0x8B; tp[42] = 0x44; tp[43] = r8;      /* mov r8,  [rsp+0x18] */
+    uintptr_t cont = s_module_base + kCont;
+    tp[44] = 0x48; tp[45] = 0xB8; memcpy(tp + 46, &cont, 8);
+    tp[54] = 0xFF; tp[55] = 0xE0;                                  /* jmp entry+24     */
+    s_otp_buf = tp;
+
+    DWORD oldProt = 0;
+    uint8_t* page = (uint8_t*)((uintptr_t)entry & ~0xFFFULL);
+    if (!VirtualProtect(page, 4096, PAGE_READWRITE, &oldProt)) {
+        Log("openlog: VirtualProtect failed: %lu", GetLastError());
+        return;
+    }
+    entry[0] = 0x48; entry[1] = 0xB8;
+    memcpy(entry + 2, &tp, 8);
+    entry[10] = 0xFF; entry[11] = 0xE0;
+    DWORD dummy = 0;
+    VirtualProtect(page, 4096, oldProt, &dummy);
+    InterlockedExchange(&s_open_hook_on, 1);
+    Log("openlog: INSTALLED entry=%p tp=%p (call OpenHook, jmp back -> %p)",
+        (void*)entry, (void*)tp, (void*)cont);
+}
+
+/* runs on the game thread via the emitted `call` (rdx=path, r8d=flags at
+   call time). Log-only: the trampoline restores both before entry+24. */
+static void OpenHook(const char* path, int flags)
+{
+    if (!path) return;
+    Log("open: [%c%c%c] %s", flags & 3, flags & 4 ? 'w' : '-', flags & 8 ? 'r' : '-', path);
 }
 
 /* ------------------------------------------------------------------ */
@@ -818,13 +902,23 @@ static int Ad2HookedSwap(void* window)
    VMP re-write (or anything else) shows up in the log immediately */
 static void PoolHookVerifyTick()
 {
-    if (!s_pool_hook_on || !s_module_base) return;
-    uint8_t* entry = (uint8_t*)(s_module_base + 0x30ee0);
-    if (entry[0] != 0x48 || entry[1] != 0xB8 ||
-        memcmp(entry + 2, &s_tp_buf, 8) != 0 || entry[10] != 0xFF || entry[11] != 0xE0) {
-        Log("poolhook: !!! ENTRY BYTES CORRUPTED (%02x %02x .. %02x %02x) -- hook dead",
-            entry[0], entry[1], entry[10], entry[11]);
-        InterlockedExchange(&s_pool_hook_on, 0);
+    if (s_pool_hook_on && s_module_base) {
+        uint8_t* entry = (uint8_t*)(s_module_base + 0x30ee0);
+        if (entry[0] != 0x48 || entry[1] != 0xB8 ||
+            memcmp(entry + 2, &s_tp_buf, 8) != 0 || entry[10] != 0xFF || entry[11] != 0xE0) {
+            Log("poolhook: !!! ENTRY BYTES CORRUPTED (%02x %02x .. %02x %02x) -- hook dead",
+                entry[0], entry[1], entry[10], entry[11]);
+            InterlockedExchange(&s_pool_hook_on, 0);
+        }
+    }
+    if (s_open_hook_on && s_module_base) {
+        uint8_t* entry = (uint8_t*)(s_module_base + 0x445388);
+        if (entry[0] != 0x48 || entry[1] != 0xB8 ||
+            memcmp(entry + 2, &s_otp_buf, 8) != 0 || entry[10] != 0xFF || entry[11] != 0xE0) {
+            Log("openlog: !!! ENTRY BYTES CORRUPTED (%02x %02x .. %02x %02x) -- hook dead",
+                entry[0], entry[1], entry[10], entry[11]);
+            InterlockedExchange(&s_open_hook_on, 0);
+        }
     }
 }
 
