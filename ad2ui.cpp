@@ -274,7 +274,8 @@ static bool InstallPoolHook()
     if (!tp) { snprintf(s_tp_note, sizeof s_tp_note, "VirtualAlloc failed"); return false; }
 
     memcpy(tp, entry, 24);                       /* +0x00 prologue copy  */
-    int32_t rel = (int32_t)((intptr_t)PoolHook - (intptr_t)(tp + 25));
+    /* E8 rel32 is relative to the NEXT instruction: tp+24+5 = tp+29 */
+    int32_t rel = (int32_t)((intptr_t)PoolHook - (intptr_t)(tp + 29));
     tp[24] = 0xE8; memcpy(tp + 25, &rel, 4);     /* +0x18 call PoolHook  */
     tp[29] = 0x48; tp[30] = 0x89; tp[31] = 0xC8; /* +0x1d mov rcx, rax   */
     uintptr_t cont = s_module_base + kCont;
@@ -1077,6 +1078,20 @@ static int Ad2HookedSwap(void* window)
 /* ------------------------------------------------------------------ */
 /* worker: locate IAT slot, patch, poll hotkey                         */
 /* ------------------------------------------------------------------ */
+/* watchdog: re-verify the 12-byte entry patch every ~600ms so a lazy
+   VMP re-write (or anything else) shows up in the log immediately */
+static void PoolHookVerifyTick()
+{
+    if (!s_pool_hook_on || !s_module_base) return;
+    uint8_t* entry = (uint8_t*)(s_module_base + 0x30ee0);
+    if (entry[0] != 0x48 || entry[1] != 0xB8 ||
+        memcmp(entry + 2, &s_tp_buf, 8) != 0 || entry[10] != 0xFF || entry[11] != 0xE0) {
+        Log("poolhook: !!! ENTRY BYTES CORRUPTED (%02x %02x .. %02x %02x) -- hook dead",
+            entry[0], entry[1], entry[10], entry[11]);
+        InterlockedExchange(&s_pool_hook_on, 0);
+    }
+}
+
 static DWORD WINAPI Worker(LPVOID)
 {
     Sleep(1500); /* let the game settle past injection */
@@ -1162,7 +1177,7 @@ static DWORD WINAPI Worker(LPVOID)
     int wd_ms = 0;
     for (;;) {
         Sleep(80);
-        if ((wd_ms += 80) >= 600) { wd_ms = 0; WatchdogTick(); }
+        if ((wd_ms += 80) >= 600) { wd_ms = 0; WatchdogTick(); PoolHookVerifyTick(); }
         bool d = KeyDown(VK_CONTROL) && KeyDown(VK_MENU) && KeyDown('U');
         if (d && !prev) {
             s_show_ui = !s_show_ui;
