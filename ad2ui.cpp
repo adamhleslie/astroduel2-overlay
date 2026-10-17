@@ -346,6 +346,7 @@ static uintptr_t PoolHook(long long* mgr)
 }
 
 static void InstallOpenLogHook();   /* fwd (defined below) */
+static void InstallPathBuilderHook(); /* fwd (defined below) */
 
 static void PoolInstallWorker()
 {
@@ -354,6 +355,7 @@ static void PoolInstallWorker()
     if (!InstallPoolHook())
         Log("poolhook: not installed (%s)", s_tp_note[0] ? s_tp_note : "unknown");
     InstallOpenLogHook();
+    InstallPathBuilderHook();
 }
 
 /* ---- inline log hook on FUN_140445388 (the engine's fopen wrapper) ----
@@ -439,6 +441,99 @@ static void OpenHook(const char* path, int flags)
 }
 
 /* ------------------------------------------------------------------ */
+/* ---- inline log hook on FUN_14026c1c0 (the versus level-PATH builder) ----
+
+   THE single choke point for every level load: lobby preview (FUN_140013c00),
+   the match setup (FUN_140030ee0) and FUN_14026cce0 all funnel through here
+   to build the on-disk path "levels/versus/<world>/<level>". Signature:
+     rcx = outbuf, rdx = world id, r8 = level number, r9 = flag.
+   Logging it shows WHICH levels the game requests on every load -- and tells
+   us whether the match-setup path (FUN_140030ee0) is actually entered. It is
+   also where a future r8 rewrite would force the committed level.
+
+   Prepend-and-rerun design (the prologue is frame-pointer based, so we can't
+   just resume mid-prologue): the 12-byte entry is replaced with
+   `mov rax, imm64(trp); jmp rax`. The trampoline saves all four args BELOW
+   the return address (entry_rsp-0x10..-0x20, clear of the [entry_rsp]=retaddr
+   and the original's stash slots at entry_rsp+0x10/0x18/0x20), calls PathHook
+   (log-only; returns the level to use in rax), restores the four args (r8 from
+   PathHook's rax so a rewrite would flow through), then runs a RECONSTRUCTED
+   copy of the original's first 12 bytes and jmps back to 0x14026c1cb so the
+   full function executes as if freshly entered.
+
+   Exact entry bytes (capstone-verified):
+     0x14026c1c0  48 8b c4      mov rax, rsp
+     0x14026c1c3  48 89 58 10   mov [rax+0x10], rbx
+     0x14026c1c7  48 89 70 18   mov [rax+0x18], rsi
+   (steal these 12 B; the reconstructed copy reruns them; resume at 0x14026c1cb) */
+static volatile LONG s_pb_hook_on = 0;
+static BYTE* s_pbp_buf = nullptr;
+static int PathHook(long long* outbuf, int world, int level, int flag);
+
+static int PathHook(long long* outbuf, int world, int level, int flag)
+{
+    (void)outbuf;
+    if (world >= 1 && world < POOL_WORLD_MAX)
+        Log("pathbuild: world=%d(%s) level=%d flag=%d",
+            world, PoolWorldName(world), level, flag);
+    else
+        Log("pathbuild: world=%d level=%d flag=%d", world, level, flag);
+    return level;   /* log-only: unchanged. A rewrite returns the committed level. */
+}
+
+static void InstallPathBuilderHook()
+{
+    if (!s_module_base) return;
+    const uintptr_t kEntry = 0x26c1c0;             /* 0x14026c1c0 - image base */
+    const uintptr_t kCont  = 0x26c1cb;             /* resume after stolen 12 B  */
+    const BYTE want[12] = { 0x48,0x8B,0xC4, 0x48,0x89,0x58,0x10, 0x48,0x89,0x70,0x18 };
+    uint8_t* entry = (uint8_t*)(s_module_base + kEntry);
+    if (memcmp(entry, want, 12) != 0) {
+        Log("pathbuild: prologue mismatch (%02x %02x %02x .. %02x %02x %02x) -- REFUSED",
+            entry[0], entry[1], entry[2], entry[9], entry[10], entry[11]);
+        return;
+    }
+    BYTE* tp = (BYTE*)VirtualAlloc(nullptr, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    if (!tp) { Log("pathbuild: VirtualAlloc failed"); return; }
+
+    /* trampoline (rsp is entry_rsp, %16==8, [rsp]=retaddr on entry) */
+    tp[0x00]=0x48; tp[0x01]=0x81; tp[0x02]=0xEC; tp[0x03]=0x38; tp[0x04]=0; tp[0x05]=0; tp[0x06]=0;  /* sub rsp,0x38 (->%16==0) */
+    tp[0x07]=0x48; tp[0x08]=0x89; tp[0x09]=0x4C; tp[0x0a]=0x24; tp[0x0b]=0x30;                       /* mov [rsp+0x30], rcx ([entry_rsp-8])   */
+    tp[0x0c]=0x48; tp[0x0d]=0x89; tp[0x0e]=0x54; tp[0x0f]=0x24; tp[0x10]=0x28;                       /* mov [rsp+0x28], rdx  */
+    tp[0x11]=0x49; tp[0x12]=0x89; tp[0x13]=0x44; tp[0x14]=0x24; tp[0x15]=0x20;                       /* mov [rsp+0x20], r8   */
+    tp[0x16]=0x4C; tp[0x17]=0x89; tp[0x18]=0x4C; tp[0x19]=0x24; tp[0x1a]=0x18;                       /* mov [rsp+0x18], r9   */
+    int32_t relcall = (int32_t)((intptr_t)PathHook - (intptr_t)(tp + 0x1b + 5));
+    tp[0x1b]=0xE8; memcpy(tp + 0x1c, &relcall, 4);                                                  /* call PathHook    */
+    tp[0x20]=0x48; tp[0x21]=0x8B; tp[0x22]=0x4C; tp[0x23]=0x24; tp[0x24]=0x30;                       /* mov rcx, [rsp+0x30] */
+    tp[0x25]=0x48; tp[0x26]=0x8B; tp[0x27]=0x54; tp[0x28]=0x24; tp[0x29]=0x28;                       /* mov rdx, [rsp+0x28] */
+    tp[0x2a]=0x49; tp[0x2b]=0x8B; tp[0x2c]=0xC0;                                                    /* mov r8,  rax (level) */
+    tp[0x2d]=0x4C; tp[0x2e]=0x8B; tp[0x2f]=0x4C; tp[0x30]=0x24; tp[0x31]=0x18;                       /* mov r9,  [rsp+0x18] */
+    tp[0x32]=0x48; tp[0x33]=0x81; tp[0x34]=0xC4; tp[0x35]=0x38; tp[0x36]=0; tp[0x37]=0; tp[0x38]=0;  /* add rsp, 0x38 (->entry_rsp) */
+    int32_t relorig = (int32_t)(0x40 - (0x39 + 5));                                                 /* jmp ORIG (0x40) */
+    tp[0x39]=0xE9; memcpy(tp + 0x3a, &relorig, 4);                                                  /* jmp ORIG_BYTES   */
+    /* ORIG_BYTES @0x40: reconstructed original first-12-B, then jmp back to kCont */
+    const BYTE orig12[12] = { 0x48,0x8B,0xC4, 0x48,0x89,0x58,0x10, 0x48,0x89,0x70,0x18 };
+    memcpy(tp + 0x40, orig12, 12);
+    uintptr_t cont = s_module_base + kCont;
+    tp[0x4b]=0x48; tp[0x4c]=0xB8; memcpy(tp + 0x4d, &cont, 8);                                       /* mov rax, 0x...cb  */
+    tp[0x55]=0xFF; tp[0x56]=0xE0;                                                                     /* jmp rax          */
+    s_pbp_buf = tp;
+
+    DWORD oldProt = 0;
+    uint8_t* page = (uint8_t*)((uintptr_t)entry & ~0xFFFULL);
+    if (!VirtualProtect(page, 4096, PAGE_READWRITE, &oldProt)) {
+        Log("pathbuild: VirtualProtect failed: %lu", GetLastError()); return;
+    }
+    /* entry patch: mov rax, imm64(tp) ; jmp rax  (12 bytes) */
+    entry[0]=0x48; entry[1]=0xB8; memcpy(entry + 2, &tp, 8);
+    entry[10]=0xFF; entry[11]=0xE0;
+    DWORD dummy = 0;
+    VirtualProtect(page, 4096, oldProt, &dummy);
+    InterlockedExchange(&s_pb_hook_on, 1);
+    Log("pathbuild: INSTALLED entry=%p tp=%p (call PathHook, rerun prologue, jmp -> %p)",
+        (void*)entry, (void*)tp, (void*)cont);
+}
+
 /* file-API IAT hooks: runtime path log (match-start diagnostics)      */
 /*                                                                     */
 /* IAT-hooks the game's own file imports (kernel32/shell32, not VMP   */
@@ -537,6 +632,47 @@ static DWORD WINAPI Ad2GetFileAttributesW(const wchar_t* path)
     return r;
 }
 
+/* fopen: THE real level-load path. cocos FileUtils::fillFileData
+   (FUN_1403c686c: _stat64i32 + fopen(path,"rb")) loads every .tmx and
+   *_data.xml -- it goes through the CRT import, invisible to the kernel32
+   IAT hooks. Hook the game's own fopen import (ucrtbase or msvcrt, resolved
+   at runtime; only the one actually in the game IAT will match a slot).
+   char* paths here make a future rewrite trivial: change the pointer we pass
+   to the original. */
+typedef FILE* (__cdecl *FnFopen)(const char*, const char*);
+static FnFopen s_fopen_orig = nullptr;
+
+static bool PathInterestingA(const char* p)
+{
+    if (!p) return false;
+    struct { const char* s; size_t n; } f[] = {
+        { "tmx", 3 }, { "_data.xml", 9 }, { "res/levels", 10 },
+        { "bounty", 6 }, { "dropbox", 7 },
+    };
+    /* case-insensitive substring scan */
+    for (size_t i = 0; i < sizeof(f) / sizeof(f[0]); i++) {
+        for (const char* h = p; *h; ++h) {
+            const char* a = h; size_t j = 0;
+            for (; *a; ++a, ++j) {
+                char la = (*a >= 'A' && *a <= 'Z') ? (char)(*a + 32) : *a;
+                char lb = (f[i].s[j] >= 'A' && f[i].s[j] <= 'Z') ? (char)(f[i].s[j] + 32) : f[i].s[j];
+                if (la != lb) break;
+                if (j + 1 == f[i].n) return true;
+            }
+        }
+    }
+    return false;
+}
+
+static FILE* __cdecl Ad2Fopen(const char* path, const char* mode)
+{
+    FILE* f = s_fopen_orig(path, mode);
+    if (s_hook_active && PathInterestingA(path))
+        Log("GAME fopen: %s  [%s]  (ret=%p%s)", path, mode ? mode : "?",
+            (void*)f, f ? "" : " FAILED");
+    return f;
+}
+
 /* SHGetKnownFolderPath: the base-path getter (fn_cfg_get_base_path) calls
    this with FOLDERID_UserGameLocations. Logging every request + result is
    direct ground truth for the true base path (open question #3). */
@@ -633,8 +769,13 @@ static void InstallFileApiHooks()
     if (o5) s_gfa_orig = (FnGetFileAttributesW)o5;
     uintptr_t o6 = HookIatImportDll("shell32.dll", "SHGetKnownFolderPath", Ad2SHGKF);
     if (o6) s_shgkf_orig = (FnSHGKF)o6;
-    Log("fileapi: summary fff=%p cdw=%p cfw=%p cf2=%p gfa=%p shgkf=%p",
-        (void*)o1, (void*)o2, (void*)o3, (void*)o4, (void*)o5, (void*)o6);
+    /* CRT fopen: try ucrtbase first, then msvcrt -- whichever address the
+       loader actually bound into the game's IAT is the one that matches. */
+    uintptr_t o7 = HookIatImportDll("ucrtbase.dll", "fopen", Ad2Fopen);
+    if (!o7) o7 = HookIatImportDll("msvcrt.dll", "fopen", Ad2Fopen);
+    if (o7) s_fopen_orig = (FnFopen)o7;
+    Log("fileapi: summary fff=%p cdw=%p cfw=%p cf2=%p gfa=%p shgkf=%p fopen=%p",
+        (void*)o1, (void*)o2, (void*)o3, (void*)o4, (void*)o5, (void*)o6, (void*)o7);
 }
 
 /* ------------------------------------------------------------------ */
