@@ -362,17 +362,24 @@ static void PoolInstallWorker()
    and *_data.xml loads go through this wrapper (CRT fopen), which bypasses
    every kernel32 IAT hook, so the file-API IAT log alone is blind to them.
 
-   ABI: OpenHook(void* this, const char* path, byte flags) -> handle.
-   Entry prologue (24 B, ends exactly at 0x1404453a4):
-     push rbx / sub rsp,0x20 / mov eax,r8d / xor ecx,ecx / and al,3 /
-     mov rbx,rdx / cmp al,1 / jne
-   The body after entry+24 still reads r8b (mode select) and re-reads the
-   path (from rbx, and rdx), and LogHook is a callee that clobbers the
-   volatile rdx/r8, so both are saved across the call in the prologue's
-   own 0x20 scratch: rsp+0x10 = rdx, rsp+0x18 = r8.
-   Trampoline: <24 B copy> save rdx/save r8 / call OpenHook /
-   restore rdx/restore r8 / jmp entry+24.  Stack at the call: rsp = 0 mod16
-   (the copied prologue left it there), so the callee gets 8 mod16. */
+   Exact entry bytes (capstone-verified against the unpacked PE):
+     0x140445388  40 53          push rbx
+     0x14044538a  48 83 EC 20    sub  rsp, 0x20
+     0x14044538e  41 8B C0       mov  eax, r8d        ; flags
+     0x140445391  33 C9          xor  ecx, ecx
+     0x140445393  24 03          and  al, 3           ; al = flags & 3
+     0x140445395  48 8B DA       mov  rbx, rdx        ; path (callee-saved)
+     0x140445398  3C 01          cmp  al, 1           ; <-- resume here
+   Steal the first 16 B (through mov rbx,rdx); resume at 0x140445398.
+   The code after resume reads al (flags&3), r8b (mode), and the path
+   (rdx and/or rbx) -- and OpenHook's Log() clobbers all three (volatile
+   x64 ABI), so rdx/r8/rax are saved in the prologue's own 0x20 scratch
+   ([rsp+8],[rsp+0x10],[rsp+0x18]) around the call and restored before
+   the absolute jmp back. rbx is ABI-callee-saved so Log keeps it.
+   Trampoline: <16 B copy> save x3 / call OpenHook / restore x3 /
+   jmp 0x140445398. Stack at the call: rsp = 0 mod16 (push + sub 0x20),
+   so the callee gets the required 8 mod16. OpenHook is log-only; its
+   rax return is discarded by the restore. */
 static volatile LONG s_open_hook_on = 0;
 static BYTE* s_otp_buf = nullptr;
 static void OpenHook(const char* path, int flags);
@@ -380,29 +387,30 @@ static void OpenHook(const char* path, int flags);
 static void InstallOpenLogHook()
 {
     if (!s_module_base) return;
-    const uintptr_t kEntry = 0x445388, kCont = 0x4453a4;
-    const BYTE want[24] = { 0x53, 0x48,0x83,0xEC,0x20, 0x48,0x89,0xC8, 0x31,0xC9,
-                            0x24,0x03, 0x48,0x89,0xD3, 0x3C,0x01, 0x0F,0x85 };
+    const uintptr_t kEntry = 0x445388, kCont = 0x445398;
+    const BYTE want[16] = { 0x40,0x53, 0x48,0x83,0xEC,0x20, 0x41,0x8B,0xC0,
+                            0x33,0xC9, 0x24,0x03, 0x48,0x8B,0xDA };
     uint8_t* entry = (uint8_t*)(s_module_base + kEntry);
-    if (memcmp(entry, want, 24) != 0) {
+    if (memcmp(entry, want, 16) != 0) {
         Log("openlog: prologue mismatch (%02x %02x %02x .. %02x %02x %02x) -- REFUSED",
-            entry[0], entry[1], entry[2], entry[21], entry[22], entry[23]);
+            entry[0], entry[1], entry[2], entry[13], entry[14], entry[15]);
         return;
     }
     BYTE* tp = (BYTE*)VirtualAlloc(nullptr, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
     if (!tp) { Log("openlog: VirtualAlloc failed"); return; }
 
-    memcpy(tp, entry, 24);                          /* +0x00 24 B prologue copy */
-    int32_t rel = (int32_t)((intptr_t)OpenHook - (intptr_t)(tp + 41));
-    uint8_t rdx = 0x10, r8 = 0x18;                  /* scratch slots (rsp+0x10/0x18) */
-    tp[24] = 0x48; tp[25] = 0x89; tp[26] = 0x54; tp[27] = rdx;   /* mov [rsp+0x10], rdx */
-    tp[28] = 0x41; tp[29] = 0x89; tp[30] = 0x44; tp[31] = r8;    /* mov [rsp+0x18], r8  */
-    tp[32] = 0xE8; memcpy(tp + 33, &rel, 4);                        /* call OpenHook    */
-    tp[36] = 0x48; tp[37] = 0x8B; tp[38] = 0x54; tp[39] = rdx;     /* mov rdx, [rsp+0x10] */
-    tp[40] = 0x41; tp[41] = 0x8B; tp[42] = 0x44; tp[43] = r8;      /* mov r8,  [rsp+0x18] */
+    memcpy(tp, entry, 16);                          /* +0x00 16 B prologue copy */
+    int32_t rel = (int32_t)((intptr_t)OpenHook - (intptr_t)(tp + 0x1f + 5));
+    tp[0x10] = 0x48; tp[0x11] = 0x89; tp[0x12] = 0x54; tp[0x13] = 0x08; /* mov [rsp+8], rdx  */
+    tp[0x15] = 0x41; tp[0x16] = 0x89; tp[0x17] = 0x44; tp[0x18] = 0x10; /* mov [rsp+0x10], r8 */
+    tp[0x1a] = 0x48; tp[0x1b] = 0x89; tp[0x1c] = 0x44; tp[0x1d] = 0x18; /* mov [rsp+0x18], rax */
+    tp[0x1f] = 0xE8; memcpy(tp + 0x20, &rel, 4);    /* call OpenHook         */
+    tp[0x24] = 0x48; tp[0x25] = 0x8B; tp[0x26] = 0x54; tp[0x27] = 0x08; /* mov rdx, [rsp+8]   */
+    tp[0x29] = 0x41; tp[0x2a] = 0x8B; tp[0x2b] = 0x44; tp[0x2c] = 0x10; /* mov r8,  [rsp+0x10] */
+    tp[0x2e] = 0x48; tp[0x2f] = 0x8B; tp[0x30] = 0x44; tp[0x31] = 0x18; /* mov rax, [rsp+0x18] */
     uintptr_t cont = s_module_base + kCont;
-    tp[44] = 0x48; tp[45] = 0xB8; memcpy(tp + 46, &cont, 8);
-    tp[54] = 0xFF; tp[55] = 0xE0;                                  /* jmp entry+24     */
+    tp[0x33] = 0x48; tp[0x34] = 0xB8; memcpy(tp + 0x35, &cont, 8);
+    tp[0x3d] = 0xFF; tp[0x3e] = 0xE0;               /* jmp 0x140445398       */
     s_otp_buf = tp;
 
     DWORD oldProt = 0;
@@ -421,12 +429,13 @@ static void InstallOpenLogHook()
         (void*)entry, (void*)tp, (void*)cont);
 }
 
-/* runs on the game thread via the emitted `call` (rdx=path, r8d=flags at
-   call time). Log-only: the trampoline restores both before entry+24. */
+/* runs on the game thread via the emitted `call` (rcx=this, rdx=path,
+   r8d=flags at call time). Log-only: the trampoline restores rdx/r8/rax
+   before jumping back to 0x140445398. */
 static void OpenHook(const char* path, int flags)
 {
     if (!path) return;
-    Log("open: [%c%c%c] %s", flags & 3, flags & 4 ? 'w' : '-', flags & 8 ? 'r' : '-', path);
+    Log("open: [f%d] %s", flags & 0xF, path);
 }
 
 /* ------------------------------------------------------------------ */
