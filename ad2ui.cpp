@@ -1,29 +1,14 @@
 /* ad2ui.cpp -- in-game ImGui overlay for Astro Duel 2 (WREngine / cocos2d-x 3.17.X, SDL3)
  *
- * Purpose (milestone 2: custom-levels viewer, read-only):
- *   A diagnostic overlay for the CUSTOM LEVELS feature. It shows
- *     - the custom-levels dir the game scans (My Games\Astro Duel 2\
- *       Levels\Bounty\, plus the -dropbox fallback),
- *     - a live FindFirstFileW re-scan of that dir, each file classified by
- *       the 3-char level-type prefix (bw_/wt_/bh_/he_), and
- *     - the game's live flag globals (-custom/-dropbox, the menu-state==2
- *       gate, and the >4 count/type value the picker demands).
- *   The UI itself makes NO game calls and writes NO game memory. It also
- *   IAT-hooks the game's own file/known-folder imports (game import table,
- *   same as the SDL hook) purely to LOG what the game touches:
- *     - FindFirstFileW          : every scan pattern (unfiltered) -- ground
- *                                 truth for the custom-levels dir scan
- *     - CreateDirectoryW        : every mkdir (unfiltered)
- *     - CreateFileW/CreateFile2 : file opens on interesting paths only
- *                                 (tmx/_data.xml/Bounty/Dropbox/IronCactus/Games)
- *     - GetFileAttributesW      : attr probes on interesting paths only
- *                                 (this catches the dir-exists pre-check)
- *     - SHGetKnownFolderPath    : every Known Folder request + result --
- *                                 ground truth for the TRUE base path
- *   A gate watchdog (worker thread, ~600ms) logs the live gate globals
- *   (-custom/-dropbox, menu state, count/type) and the scene object
- *   (ptr, custom-mode subflag, transition gate) ON CHANGE, so the log
- *   alone reconstructs the whole runtime sequence.
+ * Purpose (versus level-pool editor, see re/LEVEL_POOL.md):
+ *   An inline hook on the per-match versus level-load funnel
+ *   FUN_140030ee0 (entry 0x140030ee0 + 24-byte trampoline). It reads the
+ *   game's per-world level pools (singleton 0x1405df4f0 + 0x4a0/0x4a8) and,
+ *   when a custom pool (level file exists in res/) is committed for that
+ *   world from the overlay, remaps the chosen index into it and re-runs the
+ *   original code; otherwise it passes through untouched. No game memory is
+ *   written outside the chosen index field (+0x380). A watchdog re-verifies
+ *   the 12-byte entry patch and logs corruption (e.g. VMP rewrites).
  *
  * Injection / render strategy (unchanged from milestone 1):
  *   - Injected into the Steam-launched game at main menu (inject.exe).
@@ -361,394 +346,6 @@ static void PoolInstallWorker()
 }
 
 /* ------------------------------------------------------------------ */
-/* custom-levels dir-scan viewer                                       */
-/*                                                                     */
-/* The game (fn_custom_levels_dirscan 0x140058ce0 ->                  */
-/* fn_custom_levels_findfirst 0x140059880) enumerates the custom-levels*/
-/* dir with FindFirstFileW(dir\*) and classifies each 3-char filename  */
-/* prefix (FUN_140058430): bw_->1 wt_->2 bh_->3 he_->4 else 0. We     */
-/* reproduce that scan ourselves and read the live flag globals so we  */
-/* can see exactly what the picker sees and whether its activation gate*/
-/* (custom||dropbox) && menu==2 && count>4 can pass. Read-only.        */
-/* ------------------------------------------------------------------ */
-
-/* FOLDERID_UserGameLocations == the "My Games" folder; the game's
-   base-path getter (FUN_1403bb910) calls SHGetKnownFolderPath with this
-   exact GUID. Declared as const GUID* (not REFCLSID) -- same ABI on x64,
-   avoids a COM header under WIN32_LEAN_AND_MEAN. */
-static const GUID kFolderUserGameLocations =
-    { 0xfdd39ad0, 0x238f, 0x46af, { 0xad, 0xb4, 0x6c, 0x85, 0x48, 0x03, 0x69, 0xc7 } };
-typedef HRESULT (WINAPI *FnSHGetKnownFolderPath)(const GUID* rfid, DWORD dwFlags, HANDLE hToken, PWSTR* pszPath);
-
-/* read .data by static RVA (runtime addr = module_base + RVA). The flags
-   live in the .data/BSS region the loader maps, so a plain deref is safe.
-   (vaddr 0x1405deXXX, image base 0x140000000 -> RVA 0x5deXXX.) */
-static uint8_t  RdByte(uintptr_t rva) { return (uint8_t)*(const uint8_t*)(s_module_base + rva); }
-static uint32_t RdInt (uintptr_t rva) { return        *(const uint32_t*)(s_module_base + rva); }
-static uint64_t RdPtr (uintptr_t rva) { return        *(const uint64_t*)(s_module_base + rva); }
-
-/* ------------------------------------------------------------------ */
-/* gate watchdog: log the custom-levels gate state ON CHANGE           */
-/*                                                                     */
-/* After a live test the log must reconstruct the whole sequence       */
-/* without the on-screen UI. So every ~600ms the worker thread reads   */
-/* the gate globals plus the scene object (via the global scene ptr    */
-/* DAT_1405dea90) and logs a line whenever anything changes. The       */
-/* scene reads are SEH-guarded: a null/garbage scene pointer must      */
-/* never take the game down.                                           */
-/* ------------------------------------------------------------------ */
-struct GateSnap {
-    uint8_t  custom;     /* 0x5de605 -custom   */
-    uint8_t  dropbox;    /* 0x5de5ee -dropbox  */
-    uint8_t  d5ce;       /* dropbox mode==0    */
-    uint8_t  d5cf;       /* dropbox mode==2    */
-    uint8_t  menu;       /* 0x5de558 menu state (picker needs ==2) */
-    uint8_t  ct;         /* 0x5de5e8 count/type (picker needs >4)  */
-    uint64_t scene;      /* DAT_1405dea90 global scene pointer     */
-    uint32_t subflag;    /* *(scene+0x368)+0x37c custom-mode flag  */
-    uint32_t ready;      /* *(*(scene+0x5c0)) readiness object     */
-    uint32_t transgate;  /* *(DAT_1405de8b8)+0x352 (all transitions) */
-    int      ok;         /* 0 = a scene read faulted               */
-    float    timer;      /* scene+0x350 (excluded from change test) */
-};
-
-/* POD locals only: C++ forbids __try in functions that need unwinding. */
-static GateSnap ReadGateSnap()
-{
-    GateSnap s;
-    memset(&s, 0, sizeof s);
-    s.ok      = 1;
-    s.custom  = RdByte(0x5de605);
-    s.dropbox = RdByte(0x5de5ee);
-    s.d5ce    = RdByte(0x5de5ce);
-    s.d5cf    = RdByte(0x5de5cf);
-    s.menu    = RdByte(0x5de558);
-    s.ct      = RdByte(0x5de5e8);
-    s.scene   = RdPtr(0x5dea90);
-    __try {
-        uint64_t t = RdPtr(0x5de8b8);
-        if (t) s.transgate = *(const uint32_t*)(t + 0x352);
-        if (s.scene) {
-            s.timer = *(const float*)(s.scene + 0x350);
-            uint64_t sub = *(const uint64_t*)(s.scene + 0x368);
-            if (sub) s.subflag = *(const uint32_t*)(sub + 0x37c);
-            uint64_t ro = *(const uint64_t*)(s.scene + 0x5c0);
-            if (ro) s.ready = *(const uint32_t*)ro;
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) { s.ok = 0; }
-    return s;
-}
-
-static void WatchdogTick()
-{
-    GateSnap cur = ReadGateSnap();
-    static GateSnap last;
-    static int have = 0;
-    int changed = !have;
-    if (have) {
-        GateSnap l = last, c = cur;
-        l.timer = 0.0f; c.timer = 0.0f; /* float timer ticks every frame */
-        changed = (memcmp(&l, &c, sizeof l) != 0);
-    }
-    if (changed) {
-        Log("gate: -custom=%d -dropbox=%d d5ce=%d d5cf=%d | menu=%d count=%d | "
-            "scene=%p subflag=%d ready=0x%08X transgate=0x%08X timer=%.2f%s",
-            cur.custom, cur.dropbox, cur.d5ce, cur.d5cf, cur.menu, cur.ct,
-            (void*)cur.scene, cur.subflag, cur.ready, cur.transgate, cur.timer,
-            cur.ok ? "" : "  (scene read FAULT)");
-        last = cur;
-        have = 1;
-    }
-}
-
-static std::string W2A(const std::wstring& w)
-{
-    if (w.empty()) return std::string();
-    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
-    if (n <= 1) return std::string();
-    std::string s((size_t)n - 1, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &s[0], n, nullptr, nullptr);
-    return s;
-}
-
-/* "My Games" via SHGetKnownFolderPath, fallback %USERPROFILE%\Games.
-   The PWSTR is CoTaskMem-allocated; we leak it (one-time, debug tool). */
-static bool GetMyGames(std::wstring& out)
-{
-    HMODULE sh = GetModuleHandleA("shell32.dll");
-    if (sh) {
-        FnSHGetKnownFolderPath fn =
-            (FnSHGetKnownFolderPath)GetProcAddress(sh, "SHGetKnownFolderPath");
-        if (fn) {
-            PWSTR path = nullptr;
-            HRESULT hr = fn(&kFolderUserGameLocations, 0, NULL, &path);
-            if (SUCCEEDED(hr) && path) { out = path; return true; }
-        }
-    }
-    wchar_t up[1024];
-    if (GetEnvironmentVariableW(L"USERPROFILE", up, 1024)) { out = up; out += L"\\Games"; return true; }
-    return false;
-}
-
-static void BuildLevelDirs(std::wstring& bounty, std::wstring& dropbox)
-{
-    std::wstring base;
-    if (!GetMyGames(base)) return;
-    if (!base.empty() && base.back() != L'\\') base += L"\\";
-    bounty  = base + L"Astro Duel 2\\Levels\\Bounty\\";
-    dropbox = base + L"Dropbox\\IronCactus_Shared\\";
-}
-
-struct LevelEntry {
-    std::string name;      /* UTF-8 filename, incl. extension */
-    std::string prefix;    /* first 3 chars, for classification */
-    int   type      = 0;   /* 1..4 or 0 (0 = not a recognized level type) */
-    bool  isTmx     = false;
-    bool  isDataXml = false;
-    bool  isLevel   = false;   /* .tmx with a valid prefix */
-};
-
-/* reproduce FUN_140058430: match the first 3 chars of the name */
-static int ClassifyPrefix(const std::string& name)
-{
-    if (name.size() < 3) return 0;
-    std::string p = name.substr(0, 3);
-    if (p == "bw_") return 1;
-    if (p == "wt_") return 2;
-    if (p == "bh_") return 3;
-    if (p == "he_") return 4;
-    return 0;
-}
-
-/* FindFirstFileW(dir\*) -> LevelEntry list (regular files only) */
-static void ScanLevelDir(const std::wstring& dir, std::vector<LevelEntry>& out)
-{
-    out.clear();
-    if (dir.empty()) return;
-    std::wstring pattern = dir + L"\\*";
-    WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileW(pattern.c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) return;
-    do {
-        std::wstring wname = fd.cFileName;
-        if (wname == L"." || wname == L"..") continue;
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
-        LevelEntry e;
-        e.name   = W2A(wname);
-        e.prefix = e.name.substr(0, 3);
-        e.type   = ClassifyPrefix(e.name);
-        std::string ext;
-        size_t dot = e.name.find_last_of('.');
-        if (dot != std::string::npos)
-            for (char c : e.name.substr(dot + 1)) ext += (char)tolower((unsigned char)c);
-        e.isTmx     = (ext == "tmx");
-        e.isDataXml = (ext == "xml");
-        e.isLevel   = e.isTmx && e.type != 0;
-        out.push_back(e);
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
-}
-
-/* ------------------------------------------------------------------ */
-/* FindFirstFileW / CreateDirectoryW inline hooks (runtime path log)  */
-/*                                                                     */
-/* The game's custom-levels dir scan goes through kernel32!FindFirstFileW,
-/* and it mkdir's the target dir (CreateDirectoryW) when setting up.
-/* We IAT-hook both (game import table, not VMP code) and
-/* log every pattern / path -- this is ground truth for WHICH directory
-/* the game actually uses, independent of any static-analysis guess.    */
-/* ------------------------------------------------------------------ */
-static volatile LONG s_hook_active = 0;
-typedef HANDLE (WINAPI *FnFindFirstFileW)(const wchar_t*, WIN32_FIND_DATAW*);
-typedef BOOL   (WINAPI *FnCreateDirectoryW)(const wchar_t*, void*);
-typedef HANDLE (WINAPI *FnCreateFileW)(const wchar_t*, DWORD, DWORD, void*, DWORD, DWORD, void*);
-typedef BOOL   (WINAPI *FnCreateFile2)(const wchar_t*, void*, DWORD, DWORD, void*);
-typedef DWORD  (WINAPI *FnGetFileAttributesW)(const wchar_t*);
-typedef HRESULT (WINAPI *FnSHGKF)(const GUID*, DWORD, HANDLE, PWSTR*);
-static FnFindFirstFileW s_fff_orig = nullptr;
-static FnCreateDirectoryW s_cdw_orig = nullptr;
-static FnCreateFileW s_cfw_orig = nullptr;
-static FnCreateFile2 s_cf2_orig = nullptr;
-static FnGetFileAttributesW s_gfa_orig = nullptr;
-static FnSHGKF s_shgkf_orig = nullptr;
-
-/* case-insensitive substring test (hooks run at game call rates; keep it
-   cheap -- a handful of short needles, early-out) */
-static bool IContains(const wchar_t* hay, const wchar_t* needle)
-{
-    for (const wchar_t* h = hay; *h; ++h) {
-        const wchar_t* a = h, *b = needle;
-        while (*a && *b) {
-            wchar_t la = (*a >= L'A' && *a <= L'Z') ? (wchar_t)(*a + 32) : *a;
-            wchar_t lb = (*b >= L'A' && *b <= L'Z') ? (wchar_t)(*b + 32) : *b;
-            if (la != lb) break;
-            ++a; ++b;
-        }
-        if (*b == 0) return true;
-    }
-    return false;
-}
-
-/* Only interesting paths reach the log for the high-volume file APIs:
-   custom-levels names, the candidate base dirs, and anything level-ish. */
-static bool PathInteresting(const wchar_t* p)
-{
-    if (!p) return false;
-    static const wchar_t* const kFilters[] = {
-        L"tmx", L"_data.xml", L"bounty", L"ironcactus", L"dropbox",
-        L"\\games\\", L"astro duel",
-    };
-    for (size_t i = 0; i < sizeof(kFilters) / sizeof(kFilters[0]); i++)
-        if (IContains(p, kFilters[i])) return true;
-    return false;
-}
-
-static HANDLE WINAPI Ad2FindFirstFileW(const wchar_t* pattern, WIN32_FIND_DATAW* fd)
-{
-    if (pattern && s_hook_active) Log("GAME FindFirstFileW: %ls", pattern);
-    return s_fff_orig(pattern, fd);
-}
-static BOOL WINAPI Ad2CreateDirectoryW(const wchar_t* path, void* sa)
-{
-    BOOL r = s_cdw_orig(path, sa);
-    if (path && s_hook_active) Log("GAME CreateDirectoryW: %ls  (ret=%d, err=%lu)", path, r, GetLastError());
-    return r;
-}
-
-/* CreateFileW: catches level-file opens AND failures (the "lists but won't
-   load" case). Filtered to interesting paths so res-loading noise stays out. */
-static HANDLE WINAPI Ad2CreateFileW(const wchar_t* path, DWORD acc, DWORD share,
-                                    void* sa, DWORD disp, DWORD flags, void* tmpl)
-{
-    HANDLE h = s_cfw_orig(path, acc, share, sa, disp, flags, tmpl);
-    if (s_hook_active && PathInteresting(path))
-        Log("GAME CreateFileW: %ls  (ret=%p%s)", path, (void*)h,
-            h == INVALID_HANDLE_VALUE ? " FAILED" : "");
-    return h;
-}
-
-static BOOL WINAPI Ad2CreateFile2(const wchar_t* path, void* ph, DWORD acc,
-                                  DWORD opts, void* info)
-{
-    BOOL r = s_cf2_orig(path, ph, acc, opts, info);
-    if (s_hook_active && PathInteresting(path))
-        Log("GAME CreateFile2: %ls  (ret=%d%s)", path, r, r ? "" : " FAILED");
-    return r;
-}
-
-/* GetFileAttributesW: the dir-exists pre-check (fn_cfg_dir_exists, vtable
-   0x158) almost certainly probes through this -- if the scan never fires,
-   the NOT-FOUND probe of the true base dir will show up here. */
-static DWORD WINAPI Ad2GetFileAttributesW(const wchar_t* path)
-{
-    DWORD r = s_gfa_orig(path);
-    if (s_hook_active && PathInteresting(path))
-        Log("GAME GetFileAttributesW: %ls  (ret=0x%lx%s)", path, r,
-            r == INVALID_FILE_ATTRIBUTES ? " NOT-FOUND" : "");
-    return r;
-}
-
-/* SHGetKnownFolderPath: the base-path getter (fn_cfg_get_base_path) calls
-   this with FOLDERID_UserGameLocations. Logging every request + result is
-   direct ground truth for the true base path (open question #3). */
-static void LogGuid(const GUID* g, char* out, size_t n)
-{
-    snprintf(out, n, "{%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
-             g->Data1, g->Data2, g->Data3, g->Data4[0], g->Data4[1],
-             g->Data4[2], g->Data4[3], g->Data4[4], g->Data4[5], g->Data4[6], g->Data4[7]);
-}
-
-static HRESULT WINAPI Ad2SHGKF(const GUID* rfid, DWORD flags, HANDLE tok, PWSTR* out)
-{
-    HRESULT hr = s_shgkf_orig(rfid, flags, tok, out);
-    if (s_hook_active) {
-        char g[64] = "(null)";
-        if (rfid) LogGuid(rfid, g, sizeof g);
-        if (hr == S_OK && out && *out)
-            Log("GAME SHGetKnownFolderPath %s -> %ls", g, *out);
-        else
-            Log("GAME SHGetKnownFolderPath %s FAILED hr=0x%08lX", g, (unsigned long)hr);
-    }
-    return hr;
-}
-
-/* IAT-slot hook core (same mechanism as the SDL_GL_SwapWindow hook:
-   overwrite the game's import-table slot, no trampolines, no patching of
-   system-DLL code -- the earlier inline-hook attempt crashed the game).
-   `expected` is the runtime-resolved address the slot should hold. */
-static uintptr_t HookIatSlot(uintptr_t expected, void* hook, const char* tag)
-{
-    if (!expected) { Log("iat-hook %s: expected address NOT resolvable", tag); return 0; }
-    Log("iat-hook %s: expected=%p", tag, (void*)expected);
-    /* scan the whole IAT region (SDL slot at +0x47e3c0) */
-    for (uintptr_t va = 0x47e000; va < 0x495a00; va += 8) {
-        uintptr_t* slot = (uintptr_t*)(s_module_base + va);
-        if (*slot == expected) {
-            uintptr_t orig = *slot;
-            DWORD old = 0;
-            if (!VirtualProtect(slot, 8, PAGE_READWRITE, &old)) {
-                Log("iat-hook %s: VirtualProtect FAILED %lu", tag, GetLastError());
-                return 0;
-            }
-            *slot = (uintptr_t)hook;
-            DWORD d = 0; VirtualProtect(slot, 8, old, &d);
-            Log("iat-hook %s: PATCHED slot @base+%x (orig=%p)", tag, (unsigned)va, (void*)orig);
-            return orig;
-        }
-    }
-    Log("iat-hook %s: slot NOT FOUND in IAT 0x47e000..0x495a00", tag);
-    return 0;
-}
-
-/* k32/kb variant: the game's slots may hold the kernel32 forwarder or the
-   kernelbase target (match must use the runtime-resolved address of either). */
-static uintptr_t HookIatImport(const char* name, void* hook)
-{
-    HMODULE k32 = GetModuleHandleA("kernel32.dll");
-    HMODULE kb  = GetModuleHandleA("kernelbase.dll");
-    uintptr_t exp[2] = {
-        k32 ? (uintptr_t)GetProcAddress(k32, name) : 0,
-        kb  ? (uintptr_t)GetProcAddress(kb,  name) : 0,
-    };
-    for (int i = 0; i < 2; i++) {
-        if (!exp[i]) continue;
-        uintptr_t r = HookIatSlot(exp[i], hook, name);
-        if (r) return r;
-    }
-    return 0;
-}
-
-static uintptr_t HookIatImportDll(const char* dll, const char* name, void* hook)
-{
-    HMODULE h = GetModuleHandleA(dll);
-    uintptr_t exp = h ? (uintptr_t)GetProcAddress(h, name) : 0;
-    return HookIatSlot(exp, hook, name);
-}
-
-static void InstallFileApiHooks()
-{
-    uintptr_t o1 = HookIatImport("FindFirstFileW", Ad2FindFirstFileW);
-    uintptr_t o2 = HookIatImport("CreateDirectoryW", Ad2CreateDirectoryW);
-    if (o1) s_fff_orig = (FnFindFirstFileW)o1;
-    if (o2) s_cdw_orig = (FnCreateDirectoryW)o2;
-    /* activate only once the scan hooks are set, to avoid a torn state */
-    if (o1 && o2) InterlockedExchange(&s_hook_active, 1);
-    else Log("fileapi: hooks incomplete (fff=%p cdw=%p) -- logging disabled", (void*)o1, (void*)o2);
-
-    /* supplementary capture (each independent; a missing slot just logs) */
-    uintptr_t o3 = HookIatImport("CreateFileW", Ad2CreateFileW);
-    if (o3) s_cfw_orig = (FnCreateFileW)o3;
-    uintptr_t o4 = HookIatImport("CreateFile2", Ad2CreateFile2);
-    if (o4) s_cf2_orig = (FnCreateFile2)o4;
-    uintptr_t o5 = HookIatImport("GetFileAttributesW", Ad2GetFileAttributesW);
-    if (o5) s_gfa_orig = (FnGetFileAttributesW)o5;
-    uintptr_t o6 = HookIatImportDll("shell32.dll", "SHGetKnownFolderPath", Ad2SHGKF);
-    if (o6) s_shgkf_orig = (FnSHGKF)o6;
-    Log("fileapi: summary fff=%p cdw=%p cfw=%p cf2=%p gfa=%p shgkf=%p",
-        (void*)o1, (void*)o2, (void*)o3, (void*)o4, (void*)o5, (void*)o6);
-}
-
-/* ------------------------------------------------------------------ */
 /* find the game window                                                */
 /* ------------------------------------------------------------------ */
 struct WinCand { HWND h; int area; };
@@ -913,72 +510,12 @@ static void FeedInput()
 static void DrawUI()
 {
     ImGui::SetNextWindowSize(ImVec2(620, 0), ImGuiCond_FirstUseEver);
-    ImGui::Begin("ad2mod · custom levels", nullptr, ImGuiWindowFlags_NoCollapse);
+    ImGui::Begin("ad2mod overlay", nullptr, ImGuiWindowFlags_NoCollapse);
 
     ImGui::Text("frame: %d     (Ctrl+Alt+U toggles this overlay)", s_frame);
     ImGui::Separator();
 
-    /* custom-levels dirs (built once) */
-    static std::wstring s_bounty, s_dropbox;
-    static bool s_dirs_built = false;
-    if (!s_dirs_built) { BuildLevelDirs(s_bounty, s_dropbox); s_dirs_built = true; }
-    ImGui::TextWrapped("dir    %s", W2A(s_bounty).c_str());
-    ImGui::TextWrapped("alt    %s   (-dropbox)", W2A(s_dropbox).c_str());
-    ImGui::Separator();
-
-    /* live flag globals */
-    uint8_t  custom  = RdByte(0x5de605);   /* -custom  */
-    uint8_t  dropbox = RdByte(0x5de5ee);   /* -dropbox */
-    uint8_t  d5ce    = RdByte(0x5de5ce);   /* mode==0 (dropbox-path variant) */
-    uint8_t  d5cf    = RdByte(0x5de5cf);   /* mode==2 (dropbox-path variant) */
-    uint8_t  menuB   = RdByte(0x5de558);   /* menu state (picker needs ==2) */
-    uint32_t menuI   = RdInt (0x5de558);
-    uint8_t  ctB     = RdByte(0x5de5e8);   /* count/type value (picker needs >4) */
-    uint32_t ctI     = RdInt (0x5de5e8);
-
-    bool g_flags = (custom != 0 || dropbox != 0);
-    bool g_menu  = (menuB == 2);
-    bool g_count = (ctB > 4);
-    bool gate_ok = g_flags && g_menu && g_count;
-
-    ImGui::Text("-custom = %d      -dropbox = %d      (d5ce=%d d5cf=%d)",
-                custom, dropbox, d5ce, d5cf);
-    ImGui::Text("gate:  flags = %s     menu = %d %s     count = %d %s",
-                g_flags ? "OK" : "NO", menuB, g_menu ? "OK" : "NO", ctB, g_count ? "OK" : "NO");
-    ImGui::TextDisabled("menu byte=%d int=%d     count byte=%d int=%d     ->  %s",
-                        menuB, menuI, ctB, ctI, gate_ok ? "GATE PASS" : "gate not met");
-    ImGui::Separator();
-
-    /* re-scan the dir (manual only -- rescan on button click) */
-    static std::vector<LevelEntry> s_entries;
-    if (ImGui::Button("rescan"))
-        ScanLevelDir(s_bounty, s_entries);
-    int nlevel = 0;
-    for (auto& e : s_entries) if (e.isLevel) nlevel++;
-    char sum[128];
-    snprintf(sum, sizeof sum, "%d files \u00b7 %d loadable levels (.tmx with bw_/wt_/bh_/he_ prefix)",
-             (int)s_entries.size(), nlevel);
-    ImGui::Text("%s", sum);
-    ImGui::Separator();
-
-    ImGui::BeginChild("list", ImVec2(0, 260));
-    if (s_entries.empty())
-        ImGui::TextDisabled("(no files -- dir missing or empty; check the path above)");
-    for (auto& e : s_entries) {
-        const char* tag = e.isLevel  ? "LEVEL"
-                          : e.isDataXml ? "companion"
-                          : e.isTmx  ? "(.tmx, no prefix)"
-                          : "other";
-        if (e.isLevel)
-            ImGui::TextColored(ImVec4(0.40f, 0.90f, 0.40f, 1.0f),
-                               "\u25cf  %s      [%s -> %d]  %s", e.name.c_str(), e.prefix.c_str(), e.type, tag);
-        else
-            ImGui::Text("     %s      [%s]      %s", e.name.c_str(), e.prefix.c_str(), tag);
-    }
-    ImGui::EndChild();
-
     /* ---------------- versus level-pool editor ---------------- */
-    ImGui::Separator();
     ImGui::Text("VERSUS LEVEL POOL   (local play only)");
     ImGui::TextDisabled("shrink/replace/grow the live map set; commit validates files exist");
     static int sel_world = 1;
@@ -1164,10 +701,9 @@ static DWORD WINAPI Worker(LPVOID)
     InterlockedExchange(&s_hook_installed, 1);
     Log("worker: HOOK INSTALLED (orig=%p, page %p prot 0x%lx->restored)",
         (void*)s_orig_swap, (void*)page, oldProt);
-    Log("worker: custom-levels viewer ready (read-only UI; file-API + gate watchdog logger)\n");
+    Log("worker: level-pool overlay ready (Ctrl+Alt+U toggles UI)\n");
 
     /* ground truth: log every dir scan / mkdir the game performs */
-    InstallFileApiHooks();
 
     /* versus level-pool inline hook (re/LEVEL_POOL.md) */
     PoolInstallWorker();
@@ -1177,7 +713,7 @@ static DWORD WINAPI Worker(LPVOID)
     int wd_ms = 0;
     for (;;) {
         Sleep(80);
-        if ((wd_ms += 80) >= 600) { wd_ms = 0; WatchdogTick(); PoolHookVerifyTick(); }
+        if ((wd_ms += 80) >= 600) { wd_ms = 0; PoolHookVerifyTick(); }
         bool d = KeyDown(VK_CONTROL) && KeyDown(VK_MENU) && KeyDown('U');
         if (d && !prev) {
             s_show_ui = !s_show_ui;
