@@ -177,10 +177,11 @@ static int PoolWorldId(const char* name)
 /* (the overlay DLL sits in the game dir as steam_api64.dll, so its   */
 /* module path is the base). Flat object, world name -> int:           */
 /*   { "mines": 2, "sunken": 5 }                                       */
-/* 0 = no override (stock). Values outside 2..12 are refused (1 is    */
-/* the fastfail poison; 12 is the live walk-pool cap). Unknown keys   */
-/* and bad values are logged and skipped -- everything else stays     */
-/* stock. No file = all worlds stock.                                  */
+/* 0 = no override (stock). Count range is NOT validated here (1 is   */
+/* the fastfail poison; 12 is the live walk-pool cap) -- that check    */
+/* lives at another level. Unknown keys and non-int values are logged  */
+/* and skipped -- everything else stays stock. No file = all worlds   */
+/* stock.                                                              */
 /* ------------------------------------------------------------------ */
 static int s_pool_counts[POOL_WORLD_MAX] = {0};   /* 0 = stock */
 
@@ -213,9 +214,7 @@ static void PoolJsonLoad()
         int id = PoolWorldId(it->string ? it->string : "");
         if (!id) { Log("pooljson: unknown world %\"%s\" -- skipped", it->string); refused++; continue; }
         if (!cJSON_IsNumber(it) || (int)it->valuedouble != it->valueint) { Log("pooljson: %s: not an int -- skipped", it->string); refused++; continue; }
-        int v = it->valueint;
-        if (v < 2 || v > 12) { Log("pooljson: %s: count %d out of 2..12 -- skipped", it->string, v); refused++; continue; }
-        s_pool_counts[id] = v;
+        s_pool_counts[id] = it->valueint;
         applied++;
     }
     cJSON_Delete(root);
