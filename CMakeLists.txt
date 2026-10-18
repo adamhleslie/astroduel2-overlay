@@ -1,4 +1,4 @@
-# astroduel2-overlay -- in-game ImGui overlay DLL + injector for Astro Duel 2
+# astroduel2-overlay -- in-game ImGui overlay DLL (steam_api64.dll proxy) for Astro Duel 2
 cmake_minimum_required(VERSION 3.25)
 project(astroduel2-overlay LANGUAGES C CXX)
 
@@ -17,35 +17,24 @@ add_library(imgui STATIC
     imgui/backends/imgui_impl_opengl3.cpp)
 target_include_directories(imgui PUBLIC imgui imgui/backends)
 
-# MinHook (extern/, vendored from github.com/TsudaKageyu/minhook @ 8af6b4a,
-# BSD-2-Clause): inline function hooking with HDE64-decoded trampolines.
-# Hooks WorldDataLoader::worldDataForType (RVA 0x2ae190) -- see
-# re/MINHOOK.md (astroduel2-modding repo) for the design + test plan.
-# Compiled as C exactly as upstream's CMake does.
+# MinHook v1.3.4 (submodule at minhook/, BSD-2-Clause): inline function
+# hooking with HDE64-decoded trampolines. Used for the entry hooks on
+# WorldDataLoader::worldDataForType (RVA 0x2ae190) and the level-string
+# composer (RVA 0x26C1C0). Compiled as C like upstream; x64-only (hde64).
 add_library(minhook STATIC
-    extern/src/hook.c
-    extern/src/buffer.c
-    extern/src/trampoline.c
-    extern/src/hde/hde64.c)
-target_include_directories(minhook PUBLIC extern/include)
+    minhook/src/hook.c
+    minhook/src/buffer.c
+    minhook/src/trampoline.c
+    minhook/src/hde/hde64.c)
+target_include_directories(minhook PUBLIC minhook/include)
 
 add_library(ad2ui SHARED
     ad2ui.cpp)   # WIN32_LEAN_AND_MEAN / NOMINMAX are #defined in-source
 # /Oy- (disable frame-pointer omission) so _ReturnAddress() in the
-# hooks' ra0 caller forensics (re/MINHOOK.md Phase 0.6) is reliable.
+# hooks' ra0 caller forensics (_ReturnAddress, below) is reliable.
 # Negligible cost for this DLL.
 target_compile_options(ad2ui PRIVATE /W3 /utf-8 /Oy-)
 target_link_libraries(ad2ui PRIVATE imgui minhook opengl32 user32 gdi32 kernel32)
-
-add_executable(inject
-    inject.c)   # WIN32_LEAN_AND_MEAN is #defined in-source
-target_compile_options(inject PRIVATE /W3)
-target_link_libraries(inject PRIVATE kernel32)
-
-add_executable(ad2launch
-    ad2launch.c)   # WIN32_LEAN_AND_MEAN is #defined in-source
-target_compile_options(ad2launch PRIVATE /W3)
-target_link_libraries(ad2launch PRIVATE kernel32)
 
 # steam_api64 proxy: same overlay code, but built as the game's own
 # steam_api64.dll and loaded at import resolution (before any game code

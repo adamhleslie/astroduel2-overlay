@@ -1,45 +1,36 @@
 /* ad2ui.cpp -- in-game ImGui overlay for Astro Duel 2 (WREngine / cocos2d-x 3.17.X, SDL3)
  *
- * Current state (feature/minhook -- MinHook phase-0 diagnostic build):
- *   IAT hooks: the SDL_GL_SwapWindow IAT hook (overlay) and the
- *   kernel32/shell32 file-API IAT log hooks (dir scans, mkdirs, opens).
- *   PLUS MinHook (extern/) LOG-ONLY hooks on the level-pool pipeline:
+ * Built as both ad2ui.dll and the steam_api64.dll proxy (see CMakeLists);
+ * in either case DllMain spawns one worker thread that:
+ *   1. waits for VMP to unpack the image in place (UNPACK GATE below),
+ *   2. IAT-hooks SDL_GL_SwapWindow to render an ImGui overlay on the
+ *      game's own GL context (render strategy below),
+ *   3. IAT-hooks the file APIs (kernel32/shell32/CRT fopen) for a
+ *      runtime path log of what the game reads,
+ *   4. installs MinHook LOG-ONLY hooks on the level-pool pipeline:
  *     GetWorldDataHook @ 0x1402ae190 WorldDataLoader::worldDataForType --
- *             the per-world level-count switch (which call site fired,
- *             worldType). Returns the original's result via MinHook's
- *             trampoline; no override logic yet (phase 1).
+ *             the per-world level-count provider. Logs worldType + ra0
+ *             (which call site fired). Returns the original's result via
+ *             MinHook's trampoline; no override logic.
  *     GetLevelHook @ 0x14026C1C0 getLevelString -- the level-string
  *             composer every level-load path goes through (4 call sites
- *             binary-wide). Logs world/num/mode + composed path + ra0
- *             (which composer fired, ra0). Phase 0.6: the tool that
- *             answers the match-start load-path question.
- *     (The former funnel hook on 0x140030ee0 was removed 2026-10-18:
- *             live test proved it fires once at startup, never at match
- *             start -- the load does not route through it.)
- *   All hooks log the module-relative return address (ra0) via
- *   _ReturnAddress() -- /Oy- in CMakeLists keeps the frame pointer so
- *   it is valid (entry patch is an absolute JMP; the game's CALL
- *   pushed the real rip before we arrived). Map ra0 -> function with
- *   re/unpacked_functions.txt: it names the exact call site (e.g.
- *   which of the 189 polymorphic +0x650 vtable slots invoked the
- *   funnel).
- *   The hand-rolled counthook/funnelhook trampolines (buggy: rax lost at
- *   the ret, re/LEVEL_POOL.md #10) are no longer installed and the old
- *   1-byte mines-count patch was removed in this phase. re/MINHOOK.md
- *   holds the design + test plan. Diagnostics ->
- *   %LOCALAPPDATA%\AstroDuel2Mod\probe_ui.log.
+ *             binary-wide). Logs world/num/mode + the composed path + ra0
+ *             (which composer fired) + the pick context globals.
+ *     All MinHook hooks log the module-relative return address (ra0) via
+ *     _ReturnAddress() -- /Oy- in CMakeLists keeps the frame pointer so
+ *     it is valid (the entry patch is an absolute JMP; the game's CALL
+ *     pushed the real rip before we arrived).
+ *   All diagnostics -> %LOCALAPPDATA%\AstroDuel2Mod\probe_ui.log
  *
- *   UNPACK GATE: the DLL can now be loaded via a SUSPENDED start
- *   (ad2launch.exe: CreateProcess(CREATE_SUSPENDED) -> LoadLibrary ->
- *   ResumeThread). Because all 117 .tmx levels are preloaded in one ~450 ms
- *   block ~10 s after process start (Procmon capture, re/LEVEL_POOL.md),
- *   the worker polls until the VMP stub has unpacked the image in place
- *   (verified by the 20-byte prologue at RVA 0x26cce0) before patching
- *   anything. Manual inject (inject.exe into a running game) still works:
- *   the gate passes immediately.
+ *   UNPACK GATE: the game ships VMP-packed, and loaded at import
+ *   resolution (steam_api64 proxy) the stub has NOT run yet -- sections
+ *   are still ciphertext. Because all 117 .tmx levels are preloaded in
+ *   one ~450 ms block ~10 s after process start, the worker polls until
+ *   the VMP stub has unpacked the image in place (verified by the
+ *   20-byte prologue at RVA 0x26cce0) before patching anything. If the
+ *   image is already unpacked, the gate passes on the first check.
  *
- * Render strategy (unchanged from milestone 1):
- *   - Worker thread (DllMain-spawned) waits for the game to settle, then
+ * Render strategy:
  *   - Worker thread (DllMain-spawned) waits for the game to settle, then
  *     IAT-hooks SDL_GL_SwapWindow: the game's IAT import directory is
  *     packer-forged, so we do NOT parse the PE. Instead:
@@ -54,7 +45,6 @@
  *     no WndProc subclassing. Reads are non-consuming, so the game still gets
  *     W/X/Y for its own level picker.
  *   - UI toggle: Ctrl+Alt+U (polled in worker thread, edge-triggered).
- *   - All diagnostics -> %LOCALAPPDATA%\AstroDuel2Mod\probe_ui.log
  */
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -63,7 +53,6 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
-#include <cctype>
 #include <vector>
 #include <string>
 
@@ -75,7 +64,7 @@ extern "C" HDC WINAPI wglGetCurrentDC(void);
 #include "imgui_internal.h"
 #include "backends/imgui_impl_opengl3.h"
 #include "backends/imgui_impl_opengl3_loader.h"
-#include <MinHook.h>   /* vendored: extern/ -- re/MINHOOK.md */
+#include <MinHook.h>
 #include <intrin.h>    /* _ReturnAddress() -- hook caller forensics (x64 C++ intrinsic) */
 
 /* ------------------------------------------------------------------ */
@@ -157,23 +146,10 @@ static bool  s_mouse_btn[5] = {false,false,false,false,false};
 static bool KeyDown(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
 
 /* ------------------------------------------------------------------ */
-/* versus level-pool editor (hook: re/LEVEL_POOL.md)                  */
-/*                                                                     */
-/* The per-match versus load (FUN_140030ee0) reads a caller-set int32  */
-/* pool (mgr[+0x4a0..+0x4a8), count=len/4) and index (mgr[+0x380]) and */
-/* fastfails if index >= count. An entry hook repoints the pool to our */
-/* per-world int array and clamps the index -> shrink/replace/grow the */
-/* live set with NO on-disk deletion and NO fastfail. Versus levels are*/
-/* single .tmx files: res/levels/versus/<world>/<world><N>.tmx.        */
+/* world names (log labels)                                            */
 /* ------------------------------------------------------------------ */
 
 #define POOL_WORLD_MAX  16      /* world ids 1..15 */
-#define POOL_LEVEL_MAX  32      /* level numbers 1..31 */
-
-struct PoolCfg { int count; int items[POOL_LEVEL_MAX]; };
-static PoolCfg s_pools[POOL_WORLD_MAX];              /* live (committed) pools */
-static int     s_draft_world = 0;                    /* world the draft checkboxes hold */
-static bool    s_draft[POOL_LEVEL_MAX] = {false};    /* draft: level N included? */
 
 static const char* PoolWorldName(int id)
 {
@@ -184,73 +160,12 @@ static const char* PoolWorldName(int id)
     return (id >= 1 && id < POOL_WORLD_MAX) ? names[id] : "?";
 }
 
-static void PoolDraftLoad(int world)
-{
-    if (world < 1 || world >= POOL_WORLD_MAX) return;
-    s_draft_world = world;
-    PoolCfg* p = &s_pools[world];
-    for (int n = 1; n < POOL_LEVEL_MAX; n++)
-        s_draft[n] = false;
-    for (int i = 0; i < p->count; i++)
-        if (p->items[i] >= 1 && p->items[i] < POOL_LEVEL_MAX)
-            s_draft[p->items[i]] = true;
-}
-
-/* level file check: game CWD first (getLevelString composes relative
-   "levels/versus/..."), exe-dir\\res fallback */
-static bool PoolFileExists(int world, int level, char* out, size_t outsz)
-{
-    const char* w = PoolWorldName(world);
-    char stem[64];
-    snprintf(stem, sizeof stem, "%s%d.tmx", w, level);
-    if (GetFileAttributesA(stem) != INVALID_FILE_ATTRIBUTES) {
-        snprintf(out, outsz, "%s", stem); return true;
-    }
-    char exedir[MAX_PATH];
-    GetModuleFileNameA(nullptr, exedir, MAX_PATH);
-    char* sl = strrchr(exedir, '\\'); if (sl) *sl = 0;
-    char alt[1200];
-    snprintf(alt, sizeof alt, "%s\\res\\levels\\versus\\%s\\%s", exedir, w, stem);
-    if (GetFileAttributesA(alt) != INVALID_FILE_ATTRIBUTES) {
-        snprintf(out, outsz, "%s", alt); return true;
-    }
-    snprintf(out, outsz, "%s", stem); return false;
-}
-
-/* commit: rebuild the live int array in ascending order; refuse if any
-   checked level's file is missing or the set is empty */
-static bool PoolCommit(int world, char* err, size_t errsz)
-{
-    if (world < 1 || world >= POOL_WORLD_MAX) { snprintf(err, errsz, "bad world"); return false; }
-    int cnt = 0; int items[POOL_LEVEL_MAX];
-    for (int n = 1; n < POOL_LEVEL_MAX; n++) {
-        if (!s_draft[n]) continue;
-        char path[1200];
-        if (!PoolFileExists(world, n, path, sizeof path)) {
-            snprintf(err, errsz, "file missing: %s  (levels/versus/%s/%s%d.tmx)",
-                     path, PoolWorldName(world), PoolWorldName(world), n);
-            return false;
-        }
-        items[cnt++] = n;
-    }
-    if (cnt == 0) { snprintf(err, errsz, "empty pool"); return false; }
-    PoolCfg* p = &s_pools[world];
-    memcpy(p->items, items, (size_t)cnt * sizeof(int));
-    p->count = cnt;
-    char list[256] = {0}; int o = 0;
-    for (int i = 0; i < cnt && o < (int)sizeof(list) - 4; i++)
-        o += snprintf(list + o, sizeof(list) - o, "%s%d", i ? "," : "", items[i]);
-    Log("pool: COMMIT world=%d(%s) count=%d items=[%s]", world, PoolWorldName(world), cnt, list);
-    return true;
-}
-
 /* file-API IAT hooks: runtime path log (match-start diagnostics)      */
 /*                                                                     */
 /* IAT-hooks the game's own file imports (kernel32/shell32, not VMP   */
 /* code) and logs every dir scan, mkdir, and open on "interesting"    */
 /* paths (levels/*.tmx, *_data.xml, res/...). Ground truth for WHICH   */
-/* level files a match actually loads -- used to verify the versus     */
-/* pool funnel (FUN_140030ee0) is on the real load path.               */
+/* level files a match actually loads.                                  */
 /* ------------------------------------------------------------------ */
 static volatile LONG s_hook_active = 0;
 typedef HANDLE (WINAPI *FnFindFirstFileW)(const wchar_t*, WIN32_FIND_DATAW*);
@@ -330,9 +245,8 @@ static BOOL WINAPI Ad2CreateFile2(const wchar_t* path, void* ph, DWORD acc,
     return r;
 }
 
-/* GetFileAttributesW: the dir-exists pre-check (fn_cfg_dir_exists, vtable
-   0x158) almost certainly probes through this -- if the scan never fires,
-   the NOT-FOUND probe of the true base dir will show up here. */
+/* GetFileAttributesW: the dir-exists pre-checks probe through this --
+   a NOT-FOUND result on a base dir shows up here. */
 static DWORD WINAPI Ad2GetFileAttributesW(const wchar_t* path)
 {
     DWORD r = s_gfa_orig(path);
@@ -342,13 +256,11 @@ static DWORD WINAPI Ad2GetFileAttributesW(const wchar_t* path)
     return r;
 }
 
-/* fopen: THE real level-load path. cocos FileUtils::fillFileData
-   (FUN_1403c686c: _stat64i32 + fopen(path,"rb")) loads every .tmx and
-   *_data.xml -- it goes through the CRT import, invisible to the kernel32
-   IAT hooks. Hook the game's own fopen import (ucrtbase or msvcrt, resolved
-   at runtime; only the one actually in the game IAT will match a slot).
-   char* paths here make a future rewrite trivial: change the pointer we pass
-   to the original. */
+/* fopen: the real level-load path. cocos FileUtils::fillFileData
+   (_stat64i32 + fopen(path,"rb")) loads every .tmx and *_data.xml through
+   the CRT import, invisible to the kernel32 IAT hooks. Hook the game's own
+   fopen import (ucrtbase or msvcrt, resolved at runtime; only the one
+   actually in the game IAT will match a slot). */
 typedef FILE* (__cdecl *FnFopen)(const char*, const char*);
 static FnFopen s_fopen_orig = nullptr;
 
@@ -383,9 +295,9 @@ static FILE* __cdecl Ad2Fopen(const char* path, const char* mode)
     return f;
 }
 
-/* SHGetKnownFolderPath: the base-path getter (fn_cfg_get_base_path) calls
-   this with FOLDERID_UserGameLocations. Logging every request + result is
-   direct ground truth for the true base path (open question #3). */
+/* SHGetKnownFolderPath: the base-path getter calls this with
+   FOLDERID_UserGameLocations. Logging every request + result is direct
+   ground truth for the true base path. */
 static void LogGuid(const GUID* g, char* out, size_t n)
 {
     snprintf(out, n, "{%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
@@ -409,8 +321,8 @@ static HRESULT WINAPI Ad2SHGKF(const GUID* rfid, DWORD flags, HANDLE tok, PWSTR*
 
 /* IAT-slot hook core (same mechanism as the SDL_GL_SwapWindow hook:
    overwrite the game's import-table slot, no trampolines, no patching of
-   system-DLL code -- the earlier inline-hook attempt crashed the game).
-   `expected` is the runtime-resolved address the slot should hold. */
+   system-DLL code). `expected` is the runtime-resolved address the slot
+   should hold. */
 static uintptr_t HookIatSlot(uintptr_t expected, void* hook, const char* tag)
 {
     if (!expected) { Log("iat-hook %s: expected address NOT resolvable", tag); return 0; }
@@ -489,273 +401,10 @@ static void InstallFileApiHooks()
 }
 
 /* ------------------------------------------------------------------ */
-/* log-only entry hooks: level-pool pipeline diagnostics               */
-/* (re/LEVEL_POOL.md, re/CUSTOM_LEVELS.md)                             */
-/*                                                                     */
-/* Two inline entry hooks on one RWX trampoline page. Per hook:        */
-/*   entry : 48 B8 <imm64 tp> FF E0   (absolute jmp, 13 B)             */
-/*   tp    : <stolen prologue> <arg save> <call Hook> <arg restore>    */
-/*           <48 B8 <imm64 entry+N> FF E0>                            */
-/* Prologue bytes are verified at runtime (REFUSE -> no patch, game    */
-/* untouched) and re-verified in the worker loop. Zero behavioral      */
-/* change: every register the body depends on at entry+N is restored;  */
-/* the hooks only read and log.                                        */
-/*                                                                     */
-/* counthook  @ 0x1402ae190 WorldDataLoader::worldDataForType(out,wt) */
-/*   Prologue is 9 B (40 53 push rbx / sub rsp,0x20 / 48 8B D9        */
-/*   mov rbx,rcx) but the 13 B entry patch overruns it (cmp edx,0x10  */
-/*   at +9, ja at +0xc), so the trampoline re-emits that cmp+ja       */
-/*   (ja in absolute form, target 0x1402ae2bf) and lands at           */
-/*   entry+0x12 (movsxd rax,edx),                                     */
-/*   where rax is redefined before first use. At the call point        */
-/*   rsp = S-0x28 (0 mod 16, S = post-retaddr-push rsp); the original  */
-/*   retaddr sits at [rsp+0x28] (read into r8, the 3rd ABI arg); args  */
-/*   are (rcx=out, rdx=wt, r8=retaddr). The hook may clobber rcx/rdx   */
-/*   (ABI caller-saved), so `push rdx; push rcx` before the call and   */
-/*   `pop rcx; pop rdx` after restore both -- the body from +0x12 uses */
-/*   rdx (movsxd rax,rdx) and stores the result through rcx.           */
-/*                                                                     */
-/* funnelhook @ 0x140030ee0 (mgr)                                     */
-/*   The 24 B prologue (mov rax,rsp / 3 shadow stores / 5 pushes) ends */
-/*   exactly at entry+24, where `lea rbp,[rax-0x198]` + the movaps     */
-/*   spill block need rax = pre-prologue rsp R, and the body first     */
-/*   reads param_1 from rcx at +0xf56 (the prologue does not save      */
-/*   it). `push rax; push rcx` before the call, popped back after,     */
-/*   protects both. (The old build's epilogue `mov rcx,rax` left rax   */
-/*   = hook return = mgr -- wild movaps writes to [mgr-0x38..] and a   */
-/*   frame base of mgr-0x198. Never fired in a recorded session; this  */
-/*   push/pop design removes the hazard entirely.)                     */
-/* ------------------------------------------------------------------ */
-
-static BYTE* s_hook_page = nullptr;     /* one RWX page, both trampolines */
-
-struct EntryPatch {
-    const char* tag; uintptr_t rva; bool patched; int bad;
-};
-static EntryPatch s_ep[2] = {
-    { "counthook",  0x2ae190, false, 0 },
-    { "funnelhook", 0x30ee0,  false, 0 },
-};
-
-/* append `jmp target` (absolute, 13 B) at tp+off; returns new off */
-static size_t EmitAbsJmp(BYTE* tp, size_t off, uintptr_t target)
-{
-    tp[off] = 0x48; tp[off+1] = 0xB8;
-    memcpy(tp + off + 2, &target, 8);
-    tp[off+10] = 0xFF; tp[off+11] = 0xE0;
-    return off + 13;
-}
-
-/* append `call fn` at tp+off: E8 rel32 when in range, else absolute
-   `jmp rax; ret` is NOT used (ret would go to the wrong place) -- fall
-   back to `mov rax,fn; call rax` (12 B, clobbers rax only). */
-static size_t EmitCall(BYTE* tp, size_t off, void* fn)
-{
-    int64_t d = (int64_t)fn - (int64_t)(tp + off + 5);
-    if (d >= INT32_MIN && d <= INT32_MAX) {
-        int32_t r = (int32_t)d;
-        tp[off] = 0xE8; memcpy(tp + off + 1, &r, 4);
-        return off + 5;
-    }
-    tp[off] = 0x48; tp[off+1] = 0xB8; memcpy(tp + off + 2, &fn, 8);
-    tp[off+10] = 0xFF; tp[off+11] = 0xD0;       /* call rax */
-    return off + 12;
-}
-
-/* append `ja target` at tp+off as `76 0C; 48 B8 imm64; FF E0` (14 B).
-   rel32 can't span the DLL<->game-module distance (tens of TB), so the
-   branch is inverted (jbe +12 = NOT ja) and the taken path uses an
-   absolute jmp. Semantics after `cmp edx,0x10`: CF=0,ZF=0 (edx>0x10)
-   -> target; else fallthrough. */
-static size_t EmitJaAbs(BYTE* tp, size_t off, uintptr_t target)
-{
-    tp[off]   = 0x76; tp[off+1] = 0x0C;              /* jbe +12 (skip) */
-    tp[off+2] = 0x48; tp[off+3] = 0xB8;
-    memcpy(tp + off + 4, &target, 8);
-    tp[off+12] = 0xFF; tp[off+13] = 0xE0;
-    return off + 14;
-}
-
-/* verify prologue + emit the 13 B absolute jmp at entry */
-static bool PatchEntry(EntryPatch& ep, const BYTE* want, size_t wantLen, BYTE* tp)
-{
-    uint8_t* entry = (uint8_t*)(s_module_base + ep.rva);
-    if (memcmp(entry, want, wantLen) != 0) {
-        Log("%s: REFUSED -- prologue mismatch at +0x%lx (%02x %02x %02x %02x ..)",
-            ep.tag, (unsigned long)ep.rva, entry[0], entry[1], entry[2], entry[3]);
-        return false;
-    }
-    DWORD oldProt = 0;
-    uint8_t* page = (uint8_t*)((uintptr_t)entry & ~0xFFFULL);
-    if (!VirtualProtect(page, 4096, PAGE_READWRITE, &oldProt)) {
-        Log("%s: VirtualProtect(%p) FAILED %lu", ep.tag, (void*)entry, GetLastError());
-        return false;
-    }
-    entry[0] = 0x48; entry[1] = 0xB8;
-    memcpy(entry + 2, &tp, 8);
-    entry[10] = 0xFF; entry[11] = 0xE0;
-    DWORD dummy = 0;
-    VirtualProtect(page, 4096, oldProt, &dummy);
-    ep.patched = true;
-    Log("%s: INSTALLED entry=%p tp=%p", ep.tag, (void*)entry, (void*)tp);
-    return true;
-}
-
-/* ---- counthook ---- */
-/* WorldDataLoader::worldDataForType writes {d0,d1,d2,d3} into the
-   caller's 16 B buffer (rcx); d3 (offset 0xc) is the per-world level
-   COUNT -- both key call sites loop on *(int*)(out+0xc): the preload
-   loop (call at 0x140013d5a) and the picker (call at 0x1400327ee).
-   The hook fires at entry, before the buffer is filled, so it logs
-   worldType + the original return address (which call site) and the
-   count computed from a copy of the switch below. */
-static int WorldDataCount(int t)
-{
-    switch (t) {
-    case 1:  case 5:  case 7:              return 9;
-    case 2:  case 3:  case 4:  case 6:     
-    case 8:  case 9:                       return 8;
-    case 0:  case 0xc: case 0xe:           return 1;
-    case 0xa: case 0xb: case 0xd:          
-    case 0xf: case 0x10:                   return 0xd;
-    default:                               return -1; /* game aborts */
-    }
-}
-
-static const char* CountRetSite(uintptr_t ret)
-{
-    if (!s_module_base) return "";
-    uintptr_t rva = ret - s_module_base;   /* ret = call site + 5 */
-    switch (rva) {
-    case 0x13d5f: return "preload loop";        /* call 0x140013d5a, FUN_140013c00 */
-    case 0x327f3: return "picker/match";        /* call 0x1400327ee */
-    case 0x8d3a4: return "coop pathbuilder";    /* call 0x14008d39f */
-    case 0x19745c: return "init";               /* call 0x140197457 */
-    case 0x26bab8: return "getLevelString";     /* call 0x14026bab3 */
-    default: return "other";
-    }
-}
-
-static void CountHook(void* out, int worldType, uintptr_t retAddr)
-{
-    uintptr_t ret = retAddr;
-    Log("counthook: world=%d(%s) count=%d site=%s(+0x%lx) out=%p",
-        worldType, PoolWorldName(worldType), WorldDataCount(worldType),
-        CountRetSite(ret), (unsigned long)(ret ? ret - s_module_base : 0), out);
-}
-
-static bool InstallCountHook()
-{
-    const uintptr_t kRva = s_ep[0].rva;
-    const uintptr_t kCont = kRva + 0x12;                 /* movsxd rax,edx  */
-    const uintptr_t kJaTarget = kRva + 0x12f;            /* 0x1402ae2bf     */
-    const BYTE want[9] = { 0x40,0x53, 0x48,0x83,0xEC,0x20, 0x48,0x8B,0xD9 };
-    uint8_t* entry = (uint8_t*)(s_module_base + kRva);
-
-    BYTE* tp = s_hook_page;
-    memcpy(tp, entry, 9);                                 /* +0x00 stolen prologue */
-    tp[9] = 0x83; tp[10] = 0xFA; tp[11] = 0x10;           /* +0x09 cmp edx,0x10 */
-    size_t o = EmitJaAbs(tp, 12, s_module_base + kJaTarget); /* +0x0c ja (abs form) */
-    /* rsp = S-0x28 (0 mod 16) here. r8 = retaddr for the hook.          */
-    tp[o]=0x4C; tp[o+1]=0x8B; tp[o+2]=0x44; tp[o+3]=0x24; tp[o+4]=0x28; /* mov r8,[rsp+0x28] */
-    o += 5;
-    tp[o] = 0x52; o += 1;                                 /* push rdx (protect worldType) */
-    tp[o] = 0x51; o += 1;                                 /* push rcx (protect out)     */
-    o = EmitCall(tp, o, (void*)CountHook);                /* call; rcx=out rdx=wt r8=ret  */
-    tp[o] = 0x59; o += 1;                                 /* pop rcx (out)          */
-    tp[o] = 0x52; o += 1;                                 /* pop rdx -> rsp = S-0x28 again */
-    EmitAbsJmp(tp, o, s_module_base + kCont);
-    return PatchEntry(s_ep[0], want, 9, tp);
-}
-
-/* ---- funnelhook ---- */
-static void FunnelHook(void* mgr)
-{
-    uintptr_t m = (uintptr_t)mgr;
-    if (!mgr || m < 0x10000 || (m & 7)) {
-        Log("funnelhook: bad mgr %p -- skipped", (void*)m); return;
-    }
-    uintptr_t b = s_module_base;
-    int world = (int)*(volatile int32_t*)(b + 0x5DE484);   /* DAT_1405de484 */
-    int gate  = (int)*(volatile uint8_t*)(b + 0x5DE4CF);   /* DAT_1405de4cf */
-    int idx   = (int)*(volatile int32_t*)(m + 0x380);      /* caller's pick */
-    uintptr_t ps = *(volatile uintptr_t*)(m + 0x4A0);      /* poolStart     */
-    uintptr_t pe = *(volatile uintptr_t*)(m + 0x4A8);      /* poolEnd       */
-    Log("funnelhook: world=%d(%s) gate=%d idx=%d pool=%p..%p",
-        world, PoolWorldName(world), gate, idx, (void*)ps, (void*)pe);
-    if (ps >= 0x10000 && pe >= ps && (pe - ps) <= 256) {
-        int n = (int)((pe - ps) / 4);
-        if (n > 24) n = 24;
-        char buf[256]; int out = 0;
-        const int32_t* arr = (const int32_t*)ps;
-        for (int i = 0; i < n && out < 240; i++)
-            out += snprintf(buf + out, sizeof(buf) - out, "%s%d", i ? "," : "", arr[i]);
-        Log("funnelhook:   poolN=%d pool=[%s]", n, buf);
-    } else {
-        Log("funnelhook:   pool pointers out of range -- not dumping");
-    }
-}
-
-static bool InstallFunnelHook()
-{
-    const uintptr_t kRva = s_ep[1].rva;
-    const uintptr_t kCont = kRva + 0x18;                   /* lea rbp,[rax-0x198] */
-    const BYTE want[24] = { 0x48,0x8b,0xc4, 0x48,0x89,0x58,0x10, 0x48,0x89,0x70,0x18,
-                            0x48,0x89,0x78,0x20, 0x55, 0x41,0x54, 0x41,0x55,
-                            0x41,0x56, 0x41,0x57 };
-    uint8_t* entry = (uint8_t*)(s_module_base + kRva);
-
-    BYTE* tp = s_hook_page + 0x100;                        /* second slot on the page */
-    memcpy(tp, entry, 24);                                 /* +0x00 stolen prologue   */
-    /* rsp = R-0x28 (0 mod 16) here; rax = R, rcx = mgr. Two pushes     */
-    /* protect both across the call and keep the call point 0 mod 16,  */
-    /* so the hook gets the required 8 mod 16. Popped back before the  */
-    /* jmp (that stack region is scratch -- the body's own spills      */
-    /* overwrite it after `sub rsp,0x270`).                            */
-    tp[24] = 0x50;                                         /* +0x18 push rax          */
-    tp[25] = 0x51;                                         /* +0x19 push rcx          */
-    size_t o = EmitCall(tp, 26, (void*)FunnelHook);        /* +0x1a call FunnelHook   */
-    tp[o] = 0x59; o += 1;                                  /* +0x1f pop rcx (mgr)     */
-    tp[o] = 0x58; o += 1;                                  /* +0x20 pop rax (R)       */
-    EmitAbsJmp(tp, o, s_module_base + kCont);
-    return PatchEntry(s_ep[1], want, 24, tp);
-}
-
-static bool InstallEntryHooks()
-{
-    s_hook_page = (BYTE*)VirtualAlloc(nullptr, 0x1000,
-                                      MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-    if (!s_hook_page) { Log("entryhooks: VirtualAlloc FAILED %lu", GetLastError()); return false; }
-    bool a = InstallCountHook();
-    bool c = InstallFunnelHook();
-    Log("entryhooks: counthook=%s funnelhook=%s", a ? "ok" : "REFUSED", c ? "ok" : "REFUSED");
-    return a || c;
-}
-
-/* worker-loop re-verify: the patch must still be our 13 B absolute jmp */
-static void VerifyEntryPatches()
-{
-    for (int i = 0; i < 2; i++) {
-        EntryPatch& ep = s_ep[i];
-        if (!ep.patched) continue;
-        uint8_t* p = (uint8_t*)(s_module_base + ep.rva);
-        if (p[0] != 0x48 || p[1] != 0xB8 ||
-            *(uint64_t*)(p + 2) != (uint64_t)(i == 0 ? s_hook_page : s_hook_page + 0x100)) {
-            if (ep.bad++ < 3)
-                Log("%s: entry patch OVERWRITTEN (bytes %02x %02x %02x ..) -- VMP? "
-                    "hooks will misfire until reinstalled", ep.tag, p[0], p[1], p[2]);
-        }
-    }
-}
-
-/* ------------------------------------------------------------------ */
-/* MinHook phase 0: LOG-ONLY hook on WorldDataLoader::worldDataForType */
-/* (0x1402ae190). Proves MinHook's trampoline runs the original body   */
-/* and returns cleanly in the live VMP'd game. GetWorldDataHook calls the
-/* trampoline (== the original function: stolen prologue re-executes   */
-/* and jmps into the continuation) and returns its result -- zero      */
-/* behavioral change. No override logic yet (phase 1), no hotkey.      */
-/* re/MINHOOK.md is the design + test plan.                            */
+/* MinHook: LOG-ONLY hook on WorldDataLoader::worldDataForType        */
+/* (0x1402ae190). GetWorldDataHook calls the trampoline (== the        */
+/* original function: stolen prologue re-executes and jmps into the   */
+/* continuation) and returns its result -- zero behavioral change.    */
 /*                                                                      */
 /* Entry: 5-byte E9 rel32 to a +2^20 relay (jmp GetWorldDataHook).     */
 /* The 14-byte stolen prologue lands in the 64-byte slot's trampoline */
@@ -766,7 +415,7 @@ static void VerifyEntryPatches()
 static void*        s_orig_getWorldData = nullptr; /* MinHook trampoline = original function */
 static volatile LONG s_getWorldData_state = 0;     /* 0=off/failed, 1=installed+enabled */
 static int s_getWorldData_revert_logged = 0;
-/* getLevel (phase 0.6) state -- declared here; section below VerifyEntryHooks. */
+/* getLevel state -- declared here; the hook is further below. */
 static void*         s_orig_getLevel = nullptr;
 static volatile LONG s_getLevel_state = 0;
 static int s_getLevel_revert_logged = 0;
@@ -777,10 +426,10 @@ typedef void* (*FnGetWorldData)(void* out, int worldType);
    the detour, so the game's CALL has already pushed the real return
    address before we arrive -- _ReturnAddress() (frame-pointer based,
    valid with /Oy- from CMakeLists) == the game caller's rip, i.e. the
-   instruction right after their call. Log module-relative; map to a
-   function with re/unpacked_functions.txt. (Depth-2 walk unavailable:
-   MSVC's C _returnaddress(N) is x86-only; a MASM stub could add it if
-   ever needed -- ra0 already names the call site.) */
+   instruction right after their call. Log it module-relative; it names
+   the exact call site. (Depth-2 walk unavailable: MSVC's C
+   _returnaddress(N) is x86-only; a MASM stub could add it if ever
+   needed -- ra0 already names the call site.) */
 static void* GetWorldDataHook(void* out, int worldType)
 {
     Log("getWorldData: world=%d(%s) out=%p ra0=%08X", worldType, PoolWorldName(worldType), out,
@@ -814,7 +463,7 @@ static bool InstallGetWorldDataHook()
 
 /* ~5s worker-loop check (both MinHook entries): the entry must still be
    our E9 rel32. If VMP re-writes it the hook has silently disengaged
-   (stock behavior). Phase 0: log only, no re-arm. */
+   (stock behavior). Log only, no re-arm. */
 static void VerifyEntryHooks()
 {
     if (InterlockedCompareExchange(&s_getWorldData_state, 0, 0) == 1) {
@@ -832,25 +481,21 @@ static void VerifyEntryHooks()
 }
 
 /* ------------------------------------------------------------------ */
-/* MinHook phase 0.6 + probe (2026-10-18): LOG-ONLY hook on the       */
-/* level-string composer getLevelString (0x14026C1C0: rcx=out         */
-/* std::string, rdx=world, r8=level num, r9=mode). EVERY level-load   */
-/* path composes its path here -- the whole binary has exactly 4 call */
-/* sites:                                                             */
+/* MinHook: LOG-ONLY hook on the level-string composer getLevelString */
+/* (0x14026C1C0: rcx=out std::string, rdx=world, r8=level num,        */
+/* r9=mode). EVERY level-load path composes its path here -- the whole*/
+/* binary has exactly 4 call sites:                                   */
 /*   0x140013d9e/0x140013e30   preload, in FUN_140013c00              */
-/*   0x140031456               versus funnel 0x140030ee0 (hook removed */
-/*                             -- never fires at match start)         */
+/*   0x140031456               versus pick path 0x140030ee0          */
 /*   0x14026cda2               alt cluster 0x14026cce0 (world global  */
 /*                             DAT_1405de550, num from obj+0x114),    */
 /*                             called from 0x14026b9c0/0x14026bf20    */
-/* ra0 tells us WHICH composer fired. PROBE (re/LEVEL_POOL.md "glv    */
-/* probe spec"): per call also log the pick context FUN_14026B9C0     */
-/* refreshes before the chain -- pick (DAT_1405b9ff0: 2 = specified-  */
-/* level path), spec (the mode-2 specified level: DAT_1405de480 when  */
-/* DAT_1405de607 set, else singleton DAT_1405de9c8 + 0x45c) and cnt   */
-/* (DAT_1405de56c = d3 level count). Pass: every per-round load has   */
-/* num == spec and pick == 2, all num in [1..cnt]; preload burst has  */
-/* pick == 0. Zero behavioral change.                                 */
+/* ra0 tells which composer fired. Per call the hook also logs the    */
+/* pick context the picker refreshes before the chain -- pick         */
+/* (DAT_1405b9ff0: the versus game-mode enum), spec (the player-      */
+/* specified level: DAT_1405de480 when DAT_1405de607 is set, else     */
+/* singleton DAT_1405de9c8 + 0x45c) and cnt (DAT_1405de56c = the d3   */
+/* level count). Zero behavioral change.                              */
 /* ------------------------------------------------------------------ */
 typedef void* (*FnGetLevel)(void* out, int world, int num, char mode);
 
@@ -1072,61 +717,10 @@ static void FeedInput()
 
 static void DrawUI()
 {
-    ImGui::SetNextWindowSize(ImVec2(620, 0), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(480, 0), ImGuiCond_FirstUseEver);
     ImGui::Begin("ad2mod overlay", nullptr, ImGuiWindowFlags_NoCollapse);
-
+    ImGui::Text("ad2mod overlay -- hooks active");
     ImGui::Text("frame: %d     (Ctrl+Alt+U toggles this overlay)", s_frame);
-    ImGui::Separator();
-
-    /* ---------------- versus level-pool editor ---------------- */
-    ImGui::Text("VERSUS LEVEL POOL   (local play only)");
-    ImGui::TextDisabled("shrink/replace/grow the live map set; commit validates files exist");
-    static int sel_world = 1;
-    if (ImGui::BeginCombo("##poolworld", PoolWorldName(sel_world))) {
-        for (int w = 1; w < POOL_WORLD_MAX; w++) {
-            bool sel = (ImGui::Selectable(PoolWorldName(w), sel_world == w) && sel_world != w);
-            if (sel) { sel_world = w; PoolDraftLoad(w); }
-        }
-        ImGui::EndCombo();
-    }
-    ImGui::SameLine();
-    if (s_draft_world != sel_world) PoolDraftLoad(sel_world);
-    if (ImGui::Button("load current##pl")) PoolDraftLoad(sel_world);
-
-    for (int row = 0; row < 4; row++) {
-        for (int col = 0; col < 4; col++) {
-            int n = row * 4 + col + 1;
-            if (n >= POOL_LEVEL_MAX) break;
-            char label[64];
-            bool exists = false;
-            if (n <= 12) {
-                char path[1200];
-                exists = PoolFileExists(sel_world, n, path, sizeof path);
-                snprintf(label, sizeof label, "%s%d%s", PoolWorldName(sel_world), n,
-                         exists ? "" : " \u2717");
-            } else {
-                snprintf(label, sizeof label, "(slot %d)", n);
-            }
-            if (col) ImGui::SameLine();
-            if (n <= 12)
-                ImGui::Checkbox(label, &s_draft[n]);
-            else
-                ImGui::TextDisabled("--");
-        }
-    }
-    static char pl_err[256] = {0};
-    ImGui::SameLine();
-    if (ImGui::Button("commit pool##pl")) {
-        pl_err[0] = 0;
-        PoolCommit(sel_world, pl_err, sizeof pl_err);
-    }
-    if (pl_err[0])
-        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "commit refused: %s", pl_err);
-    if (s_pools[sel_world].count > 0) {
-        ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f), "committed: %d levels", s_pools[sel_world].count);
-    } else {
-        ImGui::TextDisabled("no pool committed -- stock behaviour");
-    }
     ImGui::End();
 }
 
@@ -1166,15 +760,14 @@ static int Ad2HookedSwap(void* window)
 /* worker: locate IAT slot, patch, poll hotkey                         */
 /* ------------------------------------------------------------------ */
 
-/* UNPACK GATE -- suspended-inject support -------------------------- */
-/* When ad2ui.dll is loaded via a suspended start (ad2launch.exe), the
-   VMP stub has NOT run yet: the game's sections are still ciphertext,
-   so every runtime-byte check (prologues, IAT slot contents) sees the
-   packed image. Poll until the unpacked image is verifiable -- we use
-   the 20-byte shadow-register-store prologue at RVA 0x26cce0
-   (capstone-verified against the unpacked PE; its presence at runtime
-   is confirmed by the live log history). In the manual-inject flow
-   (game already running) the gate passes on the first check. */
+/* UNPACK GATE ------------------------------------------------------- */
+/* Loaded at import resolution (steam_api64 proxy), the VMP stub has
+   NOT run yet: the game's sections are still ciphertext, so every
+   runtime-byte check (prologues, IAT slot contents) sees the packed
+   image. Poll until the unpacked image is verifiable -- we use the
+   20-byte shadow-register-store prologue at RVA 0x26cce0
+   (capstone-verified against the unpacked PE). If the image is
+   already unpacked, the gate passes on the first check. */
 static bool WaitUnpacked()
 {
     const BYTE want[20] = { 0x48,0x89,0x5C,0x24,0x08, 0x48,0x89,0x6C,0x24,0x10,
@@ -1223,15 +816,15 @@ static DWORD WINAPI Worker(LPVOID)
         } else Log("session: ReadProcessCommandLine not resolvable");
     }
 
-    /* suspended-inject: wait until VMP has unpacked the image in place
-       before trusting ANY runtime bytes (IAT slot scan, patches). */
+    /* wait until VMP has unpacked the image in place before trusting ANY
+       runtime bytes (IAT slot scan, patches). */
     if (!WaitUnpacked()) {
         Log("worker: ABORTING -- game not unpacked, refusing to patch packed bytes");
         return 1;
     }
 
-    /* SDL3.dll loads early in the game's own startup; under suspended
-       inject it may not exist yet, so poll. */
+    /* SDL3.dll loads early in the game's own startup; it may not exist
+       yet at import resolution, so poll. */
     HMODULE s3 = nullptr;
     for (int i = 0; i < 450 && !s3; i++) {          /* up to 90 s */
         s3 = GetModuleHandleA("SDL3.dll");
@@ -1288,24 +881,14 @@ static DWORD WINAPI Worker(LPVOID)
     /* file-API IAT hooks: runtime path log (match-start diagnostics) */
     InstallFileApiHooks();
 
-    /* log-only entry hooks (counthook + funnelhook) -- must be in before
-       the ~9 s preload block, and they are: this runs ~1 s after start.
-       DISABLED 2026-10-17: startup crash in the first live two-hook run
-       (counthook fired once at the init site, then AD2_Crash dump at
-       23:20:54). Control run: IAT hooks only, no .text patching. */
-    /* InstallEntryHooks(); */
-
-    /* MinHook phase 0: log-only hook on worldDataForType (re/MINHOOK.md).
-       Installed after the IAT hooks (render path stable) and before the
-       ~t+9s preload block that first fires it. The old 1-byte mines-count
-       patch was removed entirely in this phase. */
+    /* log-only hook on worldDataForType. Installed after the IAT hooks
+       (render path stable) and before the ~t+9s preload block that
+       first fires it. */
     InstallGetWorldDataHook();
 
-    /* MinHook phase 0.6 + probe: log-only level-string composer hook
-       (re/MINHOOK.md Phase 0.6, re/LEVEL_POOL.md "glv probe spec").
-       Identifies WHICH of the 4 path composers fired (ra0), logs the
-       composed path, and the pick context (pick/spec/cnt) -- confirms
-       the live pick path in one live test. */
+    /* log-only level-string composer hook: identifies which of the 4
+       call sites fired (ra0), logs the composed path and the pick
+       context (pick/spec/cnt). */
     InstallGetLevelHook();
 
     /* hotkey poll: Ctrl+Alt+U toggles UI */
@@ -1314,7 +897,6 @@ static DWORD WINAPI Worker(LPVOID)
     for (;;) {
         Sleep(80);
         if ((++tick % 62) == 0) VerifyEntryHooks();    /* ~5s: entries still ours? */
-        /* if ((++tick % 62) == 0) VerifyEntryPatches(); */
         bool d = KeyDown(VK_CONTROL) && KeyDown(VK_MENU) && KeyDown('U');
         if (d && !prev) {
             s_show_ui = !s_show_ui;

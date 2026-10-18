@@ -1,11 +1,11 @@
 # astroduel2-overlay
 
-In-game ImGui overlay DLL (`ad2ui.dll`) + injector (`inject.exe`) for
-**Astro Duel 2** (WREngine / cocos2d-x 3.17.x fork, SDL3).
+In-game overlay DLL for **Astro Duel 2** (WREngine / cocos2d-x 3.17.x fork,
+SDL3). The overlay ships as a **`steam_api64.dll` proxy**: it replaces the
+game's Steam DLL, so the game loads it at import resolution — no
+launcher, no process injection, just a normal Steam launch.
 
-Milestone 1 (UI only) — no game calls yet:
-
-- Injected into the Steam-launched game at the main menu.
+- Loaded into the Steam-launched game at the main menu.
 - Worker thread (spawned from `DllMain`) waits for the game to settle, then
   IAT-hooks `SDL_GL_SwapWindow` (IAT slot located by scanning the known IAT
   region for the live `SDL3.dll` export address — the game's PE import data
@@ -31,20 +31,23 @@ build_ui.bat            (Release, default)
 build_ui.bat Debug      (with PDBs, for stepping through the DLL)
 ```
 
-Outputs: `build\Release\ad2ui.dll` and `build\Release\inject.exe`.
-Line endings are CRLF (`.gitattributes`).
+Outputs: `build\Release\ad2ui.dll` and `build\Release\steam_api64.dll`
+(the same code; the Steam DLL export table comes from `steam_forwards.cpp`,
+built with `/G4` to match Steam's x64 ABI guard pages). Line endings are
+CRLF (`.gitattributes`).
 
 ## Use
 
-```bat
-:: with the game at the main menu:
-build\Release\inject.exe <PID> build\Release\ad2ui.dll
-```
+1. Back up the stock DLL: `D:\...\Astro Duel 2\steam_api64.dll`
+2. Copy `build\Release\steam_api64.dll` over it
+3. Launch the game through Steam as usual
 
-Then toggle with `Ctrl+Alt+U` in-game.
+Then toggle with `Ctrl+Alt+U` in-game. (Restore the backup to go back to
+stock behavior.)
 
 ## Layout
 
-- `ad2ui.cpp` — the overlay DLL (hook, ImGui init/UI, diagnostics)
-- `inject.c` — CreateRemoteThread + LoadLibraryW injector
+- `ad2ui.cpp` — the overlay (IAT + MinHook hooks, ImGui init/UI, diagnostics)
+- `steam_forwards.cpp` — Steam export forwards for the `steam_api64.dll` proxy
 - `imgui/` — [ocornut/imgui](https://github.com/ocornut/imgui) v1.90.9 (submodule)
+- `minhook/` — [TsudaKageyu/MinHook](https://github.com/TsudaKageyu/minhook) (submodule)

@@ -29,5 +29,5 @@ if not exist "imgui\imgui.h" (
 
 echo.
 echo Built %date% %time%:
-dir /b "build\%CFG%\ad2ui.dll" "build\%CFG%\inject.exe"
+dir /b "build\%CFG%\ad2ui.dll" "build\%CFG%\steam_api64.dll"
 endlocal
