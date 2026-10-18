@@ -68,6 +68,7 @@ extern "C" HDC WINAPI wglGetCurrentDC(void);
 #include "backends/imgui_impl_opengl3_loader.h"
 #include <MinHook.h>
 #include <intrin.h>    /* _ReturnAddress() -- hook caller forensics (x64 C++ intrinsic) */
+#include "cJSON.h"     /* submodule at cjson/ -- pool.json parsing */
 
 /* ------------------------------------------------------------------ */
 /* logging                                                             */
@@ -116,6 +117,7 @@ static void Log(const char* fmt, ...)
 /* globals                                                             */
 /* ------------------------------------------------------------------ */
 static uintptr_t s_module_base = 0;      /* main module (AstroDuel2.exe) */
+static HINSTANCE s_dll_instance = nullptr; /* our module -- game dir base for pool.json */
 static int (*s_orig_swap)(void*) = nullptr; /* original SDL_GL_SwapWindow */
 /* SDL3 dropped per-platform SDL_GetWindowHWND; the HWND is a window
    property. Resolve the two exported functions we need to read it. */
@@ -160,6 +162,65 @@ static const char* PoolWorldName(int id)
         "sunken", "graveyard", "gasrigs", "moonbase", "urspace", "void",
         "legacy", "up", "unsorted" };
     return (id >= 1 && id < POOL_WORLD_MAX) ? names[id] : "?";
+}
+static int PoolWorldId(const char* name)
+{
+    for (int i = 1; i < POOL_WORLD_MAX; i++)
+        if (strcmp(PoolWorldName(i), name) == 0) return i;
+    return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* pool.json -- per-world level-count overrides                        */
+/*                                                                     */
+/* Loaded once at startup from <gamedir>/res/levels/versus/pool.json  */
+/* (the overlay DLL sits in the game dir as steam_api64.dll, so its   */
+/* module path is the base). Flat object, world name -> int:           */
+/*   { "mines": 2, "sunken": 5 }                                       */
+/* 0 = no override (stock). Values outside 2..12 are refused (1 is    */
+/* the fastfail poison; 12 is the live walk-pool cap). Unknown keys   */
+/* and bad values are logged and skipped -- everything else stays     */
+/* stock. No file = all worlds stock.                                  */
+/* ------------------------------------------------------------------ */
+static int s_pool_counts[POOL_WORLD_MAX] = {0};   /* 0 = stock */
+
+static void PoolJsonLoad()
+{
+    char base[MAX_PATH] = {0};
+    if (!GetModuleFileNameA(s_dll_instance, base, MAX_PATH)) { Log("pooljson: GetModuleFileName FAILED"); return; }
+    char* slash = strrchr(base, '\\');
+    if (!slash) { Log("pooljson: no dir in %s", base); return; }
+    *slash = 0;
+    char path[MAX_PATH + 64];
+    snprintf(path, sizeof path, "%s\\res\\levels\\versus\\pool.json", base);
+
+    FILE* f = fopen(path, "rb");
+    if (!f) { Log("pooljson: %s not found -- all worlds stock", path); return; }
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    if (n <= 0 || n > (1 << 20)) { Log("pooljson: bad size %ld", n); fclose(f); return; }
+    char* buf = (char*)malloc((size_t)n + 1);
+    if (!buf || fread(buf, 1, (size_t)n, f) != (size_t)n) { Log("pooljson: read failed"); free(buf); fclose(f); return; }
+    buf[n] = 0;
+    fclose(f);
+
+    cJSON* root = cJSON_Parse(buf);
+    free(buf);
+    if (!root || !cJSON_IsObject(root)) { Log("pooljson: parse FAILED -- all worlds stock"); cJSON_Delete(root); return; }
+
+    int applied = 0, refused = 0;
+    cJSON* it = nullptr;
+    cJSON_ArrayForEach(it, root) {
+        int id = PoolWorldId(it->string ? it->string : "");
+        if (!id) { Log("pooljson: unknown world %\"%s\" -- skipped", it->string); refused++; continue; }
+        if (!cJSON_IsNumber(it) || (int)it->valuedouble != it->valueint) { Log("pooljson: %s: not an int -- skipped", it->string); refused++; continue; }
+        int v = it->valueint;
+        if (v < 2 || v > 12) { Log("pooljson: %s: count %d out of 2..12 -- skipped", it->string, v); refused++; continue; }
+        s_pool_counts[id] = v;
+        applied++;
+    }
+    cJSON_Delete(root);
+    Log("pooljson: %s -- %d override(s), %d refused%s", path, applied, refused,
+        applied ? "" : " (all worlds stock)");
 }
 
 /* file-API IAT hooks: runtime path log (match-start diagnostics)      */
@@ -408,10 +469,8 @@ static void InstallFileApiHooks()
 /* original function: stolen prologue re-executes and jmps into the   */
 /* continuation), which fills out[0..3] = {d0,d1,d2,d3}; we own ONLY  */
 /* d3 (the per-world level count, +0xc) and leave d0/d1/d2 untouched   */
-/* -- they always come from the real code. Untouched worlds (not in   */
-/* the override table) run 100% stock. First pass (approach           */
-/* validation): world 1 (mines) count is set to 2 explicitly; the     */
-/* rest stays stock.                                                   */
+/* -- they always come from the real code. The count override comes   */
+/* from pool.json (s_pool_counts); untouched worlds run 100% stock.   */
 /*                                                                      */
 /* Entry: 5-byte E9 rel32 to a +2^20 relay (jmp GetWorldDataHook).     */
 /* The 14-byte stolen prologue lands in the 64-byte slot's trampoline */
@@ -446,10 +505,11 @@ static void* GetWorldDataHook(void* out, int worldType)
     void* r = ((FnGetWorldData)s_orig_getWorldData)(out, worldType);
     int* f = (int*)r;                       /* f[0..3] = d0,d1,d2,d3 */
     const int stock = f[3];
-    if (worldType == 1) f[3] = 2;           /* mines: validation override */
+    const int ov = (worldType >= 1 && worldType < POOL_WORLD_MAX) ? s_pool_counts[worldType] : 0;
+    if (ov) f[3] = ov;
     Log("getWorldData: world=%d(%s) out=%p cnt=%d (stock %d)%s ra0=%08X",
         worldType, PoolWorldName(worldType), r, f[3], stock,
-        (worldType == 1 && stock != 2) ? " OVERRIDDEN" : "",
+        ov ? " OVERRIDDEN" : "",
         (uint32_t)((uintptr_t)_ReturnAddress() - (uintptr_t)s_module_base));
     return r;
 }
@@ -812,6 +872,11 @@ static DWORD WINAPI Worker(LPVOID)
 
     Log("session: ad2ui build %s %s | pid=%lu | module_base=%p",
         __DATE__, __TIME__, (unsigned long)GetCurrentProcessId(), (void*)s_module_base);
+
+    /* per-world count overrides (res/levels/versus/pool.json). Plain file
+       read -- needs no unpacking; loaded before the hooks install so the
+       summary is in the log before the first getWorldData call. */
+    PoolJsonLoad();
     {
         /* the game's own command line -- ground truth for whether
            -custom/-dropbox were actually passed to this session */
@@ -932,6 +997,7 @@ static DWORD WINAPI Worker(LPVOID)
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID)
 {
     if (reason == DLL_PROCESS_ATTACH) {
+        s_dll_instance = h;
         DisableThreadLibraryCalls(h);
         HANDLE th = CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
         if (th) CloseHandle(th);
