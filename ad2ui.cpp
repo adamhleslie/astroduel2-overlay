@@ -1,25 +1,25 @@
 /* ad2ui.cpp -- in-game ImGui overlay for Astro Duel 2 (WREngine / cocos2d-x 3.17.X, SDL3)
  *
- * Purpose (versus level-pool editor, see re/LEVEL_POOL.md):
- *   An inline hook on the per-match versus level-load funnel
- *   FUN_140030ee0 (entry 0x140030ee0 + 24-byte trampoline). It reads the
- *   game's per-world level pools (singleton 0x1405df4f0 + 0x4a0/0x4a8) and,
- *   when a custom pool (level file exists in res/) is committed for that
- *   world from the overlay, remaps the chosen index into it and re-runs the
- *   original code; otherwise it passes through untouched. No game memory is
- *   written outside the chosen index field (+0x380). A watchdog re-verifies
- *   the 12-byte entry patch and logs corruption (e.g. VMP rewrites).
+ * Current state (simple test build):
+ *   IAT-only patching. The four trampoline inline hooks (pool/poolhook,
+ *   openlog, pathbuild, matchstart -- the old level-pool-override attempt,
+ *   see re/LEVEL_POOL.md and re/CUSTOM_LEVELS.md) are REMOVED: they were
+ *   the dead approach and every one of them wrote into VMP-protected game
+ *   code. What remains: the SDL_GL_SwapWindow IAT hook (overlay) and the
+ *   kernel32/shell32 file-API IAT log hooks (dir scans, mkdirs, opens).
+ *   All diagnostics -> %LOCALAPPDATA%\AstroDuel2Mod\probe_ui.log.
  *
- *   A second log-only inline hook on the engine's fopen wrapper
- *   FUN_140445388 (0x140445388, 24-byte trampoline, rdx/r8 saved across
- *   the call) logs every file the game opens -- the .tmx / *_data.xml
- *   loads go through CRT fopen, which bypasses the kernel32 IAT hooks, so
- *   this is the only ground truth for the real level-load path. Plus the
- *   kernel32/shell32 file-API IAT hooks (dir scans, mkdirs, interesting
- *   opens). All diagnostics -> %LOCALAPPDATA%\AstroDuel2Mod\probe_ui.log.
+ *   UNPACK GATE: the DLL can now be loaded via a SUSPENDED start
+ *   (ad2launch.exe: CreateProcess(CREATE_SUSPENDED) -> LoadLibrary ->
+ *   ResumeThread). Because all 117 .tmx levels are preloaded in one ~450 ms
+ *   block ~10 s after process start (Procmon capture, re/LEVEL_POOL.md),
+ *   the worker polls until the VMP stub has unpacked the image in place
+ *   (verified by the 20-byte prologue at RVA 0x26cce0) before patching
+ *   anything. Manual inject (inject.exe into a running game) still works:
+ *   the gate passes immediately.
  *
- * Injection / render strategy (unchanged from milestone 1):
- *   - Injected into the Steam-launched game at main menu (inject.exe).
+ * Render strategy (unchanged from milestone 1):
+ *   - Worker thread (DllMain-spawned) waits for the game to settle, then
  *   - Worker thread (DllMain-spawned) waits for the game to settle, then
  *     IAT-hooks SDL_GL_SwapWindow: the game's IAT import directory is
  *     packer-forged, so we do NOT parse the PE. Instead:
@@ -152,13 +152,6 @@ struct PoolCfg { int count; int items[POOL_LEVEL_MAX]; };
 static PoolCfg s_pools[POOL_WORLD_MAX];              /* live (committed) pools */
 static int     s_draft_world = 0;                    /* world the draft checkboxes hold */
 static bool    s_draft[POOL_LEVEL_MAX] = {false};    /* draft: level N included? */
-static char    s_cwd[1024] = {0};                    /* game CWD (path check base) */
-
-/* hook-side diagnostics */
-struct PoolStats { int world; int gate; int stockCount; int customCount;
-                   uintptr_t stockStart; uintptr_t stockEnd; int hits; int clamped; };
-static PoolStats s_stats[POOL_WORLD_MAX];
-static volatile LONG s_pool_hook_on = 0;
 
 static const char* PoolWorldName(int id)
 {
@@ -227,407 +220,6 @@ static bool PoolCommit(int world, char* err, size_t errsz)
         o += snprintf(list + o, sizeof(list) - o, "%s%d", i ? "," : "", items[i]);
     Log("pool: COMMIT world=%d(%s) count=%d items=[%s]", world, PoolWorldName(world), cnt, list);
     return true;
-}
-
-/* ---- inline hook on FUN_140030ee0 (versus per-match level load) ----
-
-   Layout (no inline asm -- MSVC x64 has none; we emit the trampoline bytes):
-     entry  : 48 B8 <imm64 tp> FF E0       ; absolute jmp trampoline
-     tp +0x00: <24 B stolen prologue: mov rax,rsp / 3 movs / 5 pushes>
-     tp +0x18: E8 <rel32>  call PoolHook   ; rcx = mgr (ABI param 1)
-     tp +0x1d: 48 89 c8    mov rcx, rax    ; PoolHook returns mgr in rax
-     tp +0x22: 48 B8 <imm64 entry+24> FF E0 ;
-   Alignment: at tp entry rsp = pre-prologue rsp (orig+8 mod16); the 5
-   prologue pushes leave rsp = 0 mod 16, so `call` gives PoolHook the
-   required 8 mod 16. After ret rsp is back to 0 mod 16 = exactly where
-   the original prologue left it, and rax still holds the pre-prologue
-   rsp, so the movaps block at entry+0x26 keeps its alignment. The
-   original saves rcx at entry+0x76 (mov r15,rcx / [rbp-48],rcx) -- hence
-   the restore; volatile regs (rdx, r8-r11, xmm0-5) are not depended on
-   at entry. */
-
-static BYTE* s_tp_buf = nullptr;
-static char  s_tp_note[128] = {0};
-static uintptr_t PoolHook(long long* mgr);  /* fwd (defined after InstallPoolHook) */
-
-static bool InstallPoolHook()
-{
-    if (!s_module_base) return false;
-    const uintptr_t kEntry = 0x30ee0, kCont = 0x30ef8;   /* RVAs (image base 0x140000000) */
-    const BYTE want[24] = { 0x48,0x8b,0xc4,0x48,0x89,0x58,0x10, 0x48,0x89,0x70,0x18,
-                            0x48,0x89,0x78,0x20, 0x55, 0x41,0x54, 0x41,0x55,
-                            0x41,0x56, 0x41,0x57 };
-    uint8_t* entry = (uint8_t*)(s_module_base + kEntry);
-    if (memcmp(entry, want, 24) != 0) {
-        snprintf(s_tp_note, sizeof s_tp_note, "prologue mismatch (bytes %02x %02x %02x..)",
-                 entry[0], entry[1], entry[2]);
-        Log("poolhook: %s -- REFUSED", s_tp_note); return false;
-    }
-    BYTE* tp = (BYTE*)VirtualAlloc(nullptr, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-    if (!tp) { snprintf(s_tp_note, sizeof s_tp_note, "VirtualAlloc failed"); return false; }
-
-    memcpy(tp, entry, 24);                       /* +0x00 prologue copy  */
-    /* E8 rel32 is relative to the NEXT instruction: tp+24+5 = tp+29 */
-    int32_t rel = (int32_t)((intptr_t)PoolHook - (intptr_t)(tp + 29));
-    tp[24] = 0xE8; memcpy(tp + 25, &rel, 4);     /* +0x18 call PoolHook  */
-    tp[29] = 0x48; tp[30] = 0x89; tp[31] = 0xC8; /* +0x1d mov rcx, rax   */
-    uintptr_t cont = s_module_base + kCont;
-    tp[32] = 0x48; tp[33] = 0xB8; memcpy(tp + 34, &cont, 8);
-    tp[42] = 0xFF; tp[43] = 0xE0;                /* +0x22 jmp entry+24   */
-    s_tp_buf = tp;
-
-    DWORD oldProt = 0;
-    uint8_t* page = (uint8_t*)((uintptr_t)entry & ~0xFFFULL);
-    if (!VirtualProtect(page, 4096, PAGE_READWRITE, &oldProt)) {
-        snprintf(s_tp_note, sizeof s_tp_note, "VirtualProtect failed: %lu", GetLastError());
-        return false;
-    }
-    entry[0] = 0x48; entry[1] = 0xB8;
-    memcpy(entry + 2, &tp, 8);
-    entry[10] = 0xFF; entry[11] = 0xE0;
-    DWORD dummy = 0;
-    VirtualProtect(page, 4096, oldProt, &dummy);
-    InterlockedExchange(&s_pool_hook_on, 1);
-    s_tp_note[0] = 0;
-    Log("poolhook: INSTALLED entry=%p tp=%p (call PoolHook, jmp back -> %p)",
-        (void*)entry, (void*)tp, (void*)cont);
-    return true;
-}
-
-/* runs on the game thread via the emitted `call` (normal ABI, rcx=mgr).
-   Returns mgr in rax -- the trampoline does `mov rcx, rax`, so the
-   original's `mov r15, rcx` at entry+0x76 still sees the real pointer.
-   Reads/writes manager fields + globals only -- no locks (UI commits and
-   this run on the same render thread in practice). */
-static uintptr_t PoolHook(long long* mgr)
-{
-    uintptr_t ret = (uintptr_t)mgr;
-    /* never touch a wild pointer -- a crash here would take the game down */
-    if (!mgr || (uintptr_t)mgr < 0x10000 || ((uintptr_t)mgr & 0x7)) return ret;
-    uintptr_t b = s_module_base;
-    uintptr_t m = (uintptr_t)mgr;
-    int world = (int)*(volatile int32_t*)(b + 0x5DE484);   /* DAT_1405de484 */
-    int idx   = (int)*(volatile int32_t*)(m + 0x380);      /* caller's pick  */
-    uintptr_t stockS = *(uintptr_t*)(m + 0x4A0);           /* read BEFORE repoint */
-    uintptr_t stockE = *(uintptr_t*)(m + 0x4A8);
-    int stockN = (int)((stockE - stockS) / 4);
-    PoolCfg*  p   = (world >= 1 && world < POOL_WORLD_MAX) ? &s_pools[world] : nullptr;
-    if (p && p->count > 0) {
-        uintptr_t items = (uintptr_t)p->items;
-        *(int32_t**)(m + 0x4A0) = (int32_t*)items;
-        *(int32_t**)(m + 0x4A8) = (int32_t*)(items + (size_t)p->count * 4);
-        int clamped = 0;
-        if (idx < 0 || idx >= p->count) {
-            idx = (int)(rand() % p->count);
-            clamped = 1;
-        }
-        *(int32_t*)(m + 0x380) = (int32_t)idx;
-        PoolStats& s = s_stats[world];
-        s.world = world;
-        s.gate  = (int)*(volatile uint8_t*)(b + 0x5DE4CF);
-        s.stockStart = stockS; s.stockEnd = stockE; s.stockCount = stockN;
-        s.customCount = p->count;
-        s.hits++;
-        s.clamped += clamped;
-        Log("poolhook: world=%d(%s) gate=%d stock=%d custom=%d idx=%d -> level %d%s",
-            world, PoolWorldName(world), s.gate, stockN, p->count, idx, p->items[idx],
-            clamped ? "  [CLAMPED]" : "");
-    } else if (s_stats[world].hits == 0 && world >= 1 && world < POOL_WORLD_MAX) {
-        s_stats[world].world = world;
-        s_stats[world].gate  = (int)*(volatile uint8_t*)(b + 0x5DE4CF);
-        s_stats[world].stockStart = stockS; s_stats[world].stockEnd = stockE;
-        s_stats[world].stockCount = stockN;
-        s_stats[world].hits = -1;   /* "saw stock, no custom pool yet" */
-        Log("poolhook: stock-only hit world=%d(%s) gate=%d stockCount=%d pool=%p..%p",
-            world, PoolWorldName(world), s_stats[world].gate, stockN,
-            (void*)stockS, (void*)stockE);
-    }
-    return ret;
-}
-
-static void InstallOpenLogHook();   /* fwd (defined below) */
-static void InstallPathBuilderHook(); /* fwd (defined below) */
-static void InstallMatchStartHook();  /* fwd (defined below) */
-
-static void PoolInstallWorker()
-{
-    if (GetCurrentDirectoryA((DWORD)sizeof s_cwd, s_cwd))
-        Log("poolhook: game CWD = %s", s_cwd);
-    if (!InstallPoolHook())
-        Log("poolhook: not installed (%s)", s_tp_note[0] ? s_tp_note : "unknown");
-    InstallOpenLogHook();
-    InstallPathBuilderHook();
-    InstallMatchStartHook();
-}
-
-/* ---- inline log hook on FUN_140445388 (the engine's fopen wrapper) ----
-
-   Ground truth for WHICH files the game actually opens: the versus .tmx
-   and *_data.xml loads go through this wrapper (CRT fopen), which bypasses
-   every kernel32 IAT hook, so the file-API IAT log alone is blind to them.
-
-   Exact entry bytes (capstone-verified against the unpacked PE):
-     0x140445388  40 53          push rbx
-     0x14044538a  48 83 EC 20    sub  rsp, 0x20
-     0x14044538e  41 8B C0       mov  eax, r8d        ; flags
-     0x140445391  33 C9          xor  ecx, ecx
-     0x140445393  24 03          and  al, 3           ; al = flags & 3
-     0x140445395  48 8B DA       mov  rbx, rdx        ; path (callee-saved)
-     0x140445398  3C 01          cmp  al, 1           ; <-- resume here
-   Steal the first 16 B (through mov rbx,rdx); resume at 0x140445398.
-   The code after resume reads al (flags&3), r8b (mode), and the path
-   (rdx and/or rbx) -- and OpenHook's Log() clobbers all three (volatile
-   x64 ABI), so rdx/r8/rax are saved in the prologue's own 0x20 scratch
-   ([rsp+8],[rsp+0x10],[rsp+0x18]) around the call and restored before
-   the absolute jmp back. rbx is ABI-callee-saved so Log keeps it.
-   Trampoline: <16 B copy> save x3 / call OpenHook / restore x3 /
-   jmp 0x140445398. Stack at the call: rsp = 0 mod16 (push + sub 0x20),
-   so the callee gets the required 8 mod16. OpenHook is log-only; its
-   rax return is discarded by the restore. */
-static volatile LONG s_open_hook_on = 0;
-static BYTE* s_otp_buf = nullptr;
-static void OpenHook(const char* path, int flags);
-
-static void InstallOpenLogHook()
-{
-    if (!s_module_base) return;
-    const uintptr_t kEntry = 0x445388, kCont = 0x445398;
-    const BYTE want[16] = { 0x40,0x53, 0x48,0x83,0xEC,0x20, 0x41,0x8B,0xC0,
-                            0x33,0xC9, 0x24,0x03, 0x48,0x8B,0xDA };
-    uint8_t* entry = (uint8_t*)(s_module_base + kEntry);
-    if (memcmp(entry, want, 16) != 0) {
-        Log("openlog: prologue mismatch (%02x %02x %02x .. %02x %02x %02x) -- REFUSED",
-            entry[0], entry[1], entry[2], entry[13], entry[14], entry[15]);
-        return;
-    }
-    BYTE* tp = (BYTE*)VirtualAlloc(nullptr, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-    if (!tp) { Log("openlog: VirtualAlloc failed"); return; }
-
-    memcpy(tp, entry, 16);                          /* +0x00 16 B prologue copy */
-    int32_t rel = (int32_t)((intptr_t)OpenHook - (intptr_t)(tp + 0x1f + 5));
-    tp[0x10] = 0x48; tp[0x11] = 0x89; tp[0x12] = 0x54; tp[0x13] = 0x08; /* mov [rsp+8], rdx  */
-    tp[0x15] = 0x41; tp[0x16] = 0x89; tp[0x17] = 0x44; tp[0x18] = 0x10; /* mov [rsp+0x10], r8 */
-    tp[0x1a] = 0x48; tp[0x1b] = 0x89; tp[0x1c] = 0x44; tp[0x1d] = 0x18; /* mov [rsp+0x18], rax */
-    tp[0x1f] = 0xE8; memcpy(tp + 0x20, &rel, 4);    /* call OpenHook         */
-    tp[0x24] = 0x48; tp[0x25] = 0x8B; tp[0x26] = 0x54; tp[0x27] = 0x08; /* mov rdx, [rsp+8]   */
-    tp[0x29] = 0x41; tp[0x2a] = 0x8B; tp[0x2b] = 0x44; tp[0x2c] = 0x10; /* mov r8,  [rsp+0x10] */
-    tp[0x2e] = 0x48; tp[0x2f] = 0x8B; tp[0x30] = 0x44; tp[0x31] = 0x18; /* mov rax, [rsp+0x18] */
-    uintptr_t cont = s_module_base + kCont;
-    tp[0x33] = 0x48; tp[0x34] = 0xB8; memcpy(tp + 0x35, &cont, 8);
-    tp[0x3d] = 0xFF; tp[0x3e] = 0xE0;               /* jmp 0x140445398       */
-    s_otp_buf = tp;
-
-    DWORD oldProt = 0;
-    uint8_t* page = (uint8_t*)((uintptr_t)entry & ~0xFFFULL);
-    if (!VirtualProtect(page, 4096, PAGE_READWRITE, &oldProt)) {
-        Log("openlog: VirtualProtect failed: %lu", GetLastError());
-        return;
-    }
-    entry[0] = 0x48; entry[1] = 0xB8;
-    memcpy(entry + 2, &tp, 8);
-    entry[10] = 0xFF; entry[11] = 0xE0;
-    DWORD dummy = 0;
-    VirtualProtect(page, 4096, oldProt, &dummy);
-    InterlockedExchange(&s_open_hook_on, 1);
-    Log("openlog: INSTALLED entry=%p tp=%p (call OpenHook, jmp back -> %p)",
-        (void*)entry, (void*)tp, (void*)cont);
-}
-
-/* runs on the game thread via the emitted `call` (rcx=this, rdx=path,
-   r8d=flags at call time). Log-only: the trampoline restores rdx/r8/rax
-   before jumping back to 0x140445398. */
-static void OpenHook(const char* path, int flags)
-{
-    if (!path) return;
-    Log("open: [f%d] %s", flags & 0xF, path);
-}
-
-/* ------------------------------------------------------------------ */
-/* ---- inline log hook on FUN_14026c1c0 (the versus level-PATH builder) ----
-
-   THE single choke point for every level load: lobby preview (FUN_140013c00),
-   the match setup (FUN_140030ee0) and FUN_14026cce0 all funnel through here
-   to build the on-disk path "levels/versus/<world>/<level>". Signature:
-     rcx = outbuf, rdx = world id, r8 = level number, r9 = flag.
-   Logging it shows WHICH levels the game requests on every load -- and tells
-   us whether the match-setup path (FUN_140030ee0) is actually entered. It is
-   also where a future r8 rewrite would force the committed level.
-
-   Prepend-and-rerun design (the prologue is frame-pointer based, so we can't
-   just resume mid-prologue): the 12-byte entry is replaced with
-   `mov rax, imm64(trp); jmp rax`. The trampoline saves all four args BELOW
-   the return address (entry_rsp-0x10..-0x20, clear of the [entry_rsp]=retaddr
-   and the original's stash slots at entry_rsp+0x10/0x18/0x20), calls PathHook
-   (log-only; returns the level to use in rax), restores the four args (r8 from
-   PathHook's rax so a rewrite would flow through), then runs a RECONSTRUCTED
-   copy of the original's first 12 bytes and jmps back to 0x14026c1cb so the
-   full function executes as if freshly entered.
-
-   Exact entry bytes (capstone-verified):
-     0x14026c1c0  48 8b c4      mov rax, rsp
-     0x14026c1c3  48 89 58 10   mov [rax+0x10], rbx
-     0x14026c1c7  48 89 70 18   mov [rax+0x18], rsi
-   (steal these 12 B; the reconstructed copy reruns them; resume at 0x14026c1cb) */
-static volatile LONG s_pb_hook_on = 0;
-static BYTE* s_pbp_buf = nullptr;
-static int PathHook(long long* outbuf, int world, int level, int flag);
-
-static int PathHook(long long* outbuf, int world, int level, int flag)
-{
-    (void)outbuf;
-    if (world >= 1 && world < POOL_WORLD_MAX)
-        Log("pathbuild: world=%d(%s) level=%d flag=%d",
-            world, PoolWorldName(world), level, flag);
-    else
-        Log("pathbuild: world=%d level=%d flag=%d", world, level, flag);
-    return level;   /* log-only: unchanged. A rewrite returns the committed level. */
-}
-
-static void InstallPathBuilderHook()
-{
-    if (!s_module_base) return;
-    const uintptr_t kEntry = 0x26c1c0;             /* 0x14026c1c0 - image base */
-    const uintptr_t kCont  = 0x26c1cb;             /* resume after stolen 12 B  */
-    const BYTE want[12] = { 0x48,0x8B,0xC4, 0x48,0x89,0x58,0x10, 0x48,0x89,0x70,0x18 };
-    uint8_t* entry = (uint8_t*)(s_module_base + kEntry);
-    if (memcmp(entry, want, 12) != 0) {
-        Log("pathbuild: prologue mismatch (%02x %02x %02x .. %02x %02x %02x) -- REFUSED",
-            entry[0], entry[1], entry[2], entry[9], entry[10], entry[11]);
-        return;
-    }
-    BYTE* tp = (BYTE*)VirtualAlloc(nullptr, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-    if (!tp) { Log("pathbuild: VirtualAlloc failed"); return; }
-
-    /* trampoline (rsp is entry_rsp, %16==8, [rsp]=retaddr on entry) */
-    tp[0x00]=0x48; tp[0x01]=0x81; tp[0x02]=0xEC; tp[0x03]=0x38; tp[0x04]=0; tp[0x05]=0; tp[0x06]=0;  /* sub rsp,0x38 (->%16==0) */
-    tp[0x07]=0x48; tp[0x08]=0x89; tp[0x09]=0x4C; tp[0x0a]=0x24; tp[0x0b]=0x30;                       /* mov [rsp+0x30], rcx ([entry_rsp-8])   */
-    tp[0x0c]=0x48; tp[0x0d]=0x89; tp[0x0e]=0x54; tp[0x0f]=0x24; tp[0x10]=0x28;                       /* mov [rsp+0x28], rdx  */
-    tp[0x11]=0x4C; tp[0x12]=0x89; tp[0x13]=0x44; tp[0x14]=0x24; tp[0x15]=0x20;                       /* mov [rsp+0x20], r8   (REX.WR!) */
-    tp[0x16]=0x4C; tp[0x17]=0x89; tp[0x18]=0x4C; tp[0x19]=0x24; tp[0x1a]=0x18;                       /* mov [rsp+0x18], r9   */
-    int32_t relcall = (int32_t)((intptr_t)PathHook - (intptr_t)(tp + 0x1b + 5));
-    tp[0x1b]=0xE8; memcpy(tp + 0x1c, &relcall, 4);                                                  /* call PathHook    */
-    tp[0x20]=0x48; tp[0x21]=0x8B; tp[0x22]=0x4C; tp[0x23]=0x24; tp[0x24]=0x30;                       /* mov rcx, [rsp+0x30] */
-    tp[0x25]=0x48; tp[0x26]=0x8B; tp[0x27]=0x54; tp[0x28]=0x24; tp[0x29]=0x28;                       /* mov rdx, [rsp+0x28] */
-    tp[0x2a]=0x49; tp[0x2b]=0x8B; tp[0x2c]=0xC0;                                                    /* mov r8,  rax (level) */ /* 49 8B C0 = REX.WB mov r8,rax: correct */
-    tp[0x2d]=0x4C; tp[0x2e]=0x8B; tp[0x2f]=0x4C; tp[0x30]=0x24; tp[0x31]=0x18;                       /* mov r9,  [rsp+0x18] */
-    tp[0x32]=0x48; tp[0x33]=0x81; tp[0x34]=0xC4; tp[0x35]=0x38; tp[0x36]=0; tp[0x37]=0; tp[0x38]=0;  /* add rsp, 0x38 (->entry_rsp) */
-    int32_t relorig = (int32_t)(0x40 - (0x39 + 5));                                                 /* jmp ORIG (0x40) */
-    tp[0x39]=0xE9; memcpy(tp + 0x3a, &relorig, 4);                                                  /* jmp ORIG_BYTES   */
-    /* ORIG_BYTES @0x40: reconstructed original first-12-B, then jmp back to kCont */
-    const BYTE orig12[12] = { 0x48,0x8B,0xC4, 0x48,0x89,0x58,0x10, 0x48,0x89,0x70,0x18 };
-    memcpy(tp + 0x40, orig12, 12);
-    uintptr_t cont = s_module_base + kCont;
-    tp[0x4b]=0x48; tp[0x4c]=0xB8; memcpy(tp + 0x4d, &cont, 8);                                       /* mov rax, 0x...cb  */
-    tp[0x55]=0xFF; tp[0x56]=0xE0;                                                                     /* jmp rax          */
-    s_pbp_buf = tp;
-
-    DWORD oldProt = 0;
-    uint8_t* page = (uint8_t*)((uintptr_t)entry & ~0xFFFULL);
-    if (!VirtualProtect(page, 4096, PAGE_READWRITE, &oldProt)) {
-        Log("pathbuild: VirtualProtect failed: %lu", GetLastError()); return;
-    }
-    /* entry patch: mov rax, imm64(tp) ; jmp rax  (12 bytes) */
-    entry[0]=0x48; entry[1]=0xB8; memcpy(entry + 2, &tp, 8);
-    entry[10]=0xFF; entry[11]=0xE0;
-    DWORD dummy = 0;
-    VirtualProtect(page, 4096, oldProt, &dummy);
-    InterlockedExchange(&s_pb_hook_on, 1);
-    Log("pathbuild: INSTALLED entry=%p tp=%p (call PathHook, rerun prologue, jmp -> %p)",
-        (void*)entry, (void*)tp, (void*)cont);
-}
-
-/* ---- inline hook on FUN_14026cce0 (versus match level-setup) ----
-
-   THE level-pool override. Call chain (xref-verified):
-     FUN_14026bf20/FUN_14026b9c0 -> FUN_14026d080 (picker: random walk over a
-       per-object int array at mgr+0x158..0x160, avoiding repeats, bound by
-       max-level global DAT_1405de56c; result -> mgr+0x114)
-     -> FUN_14026cce0(mgr):  iVar13 = *(int*)(mgr + 0x114);
-                              FUN_14026c1c0(out, DAT_1405de550 [world], iVar13, 0);
-                              ... load map ...
-   i.e. mgr+0x114 is read exactly once here, right before the path is built.
-   Overriding it at entry makes the game load the committed pool's pick.
-   World id comes from the global DAT_1405de550 (base+0x5de550).
-
-   Steal design: the first 20 bytes are the four shadow-register stores
-   (mov [rsp+8],rbx; mov [rsp+0x10],rbp; mov [rsp+0x18],rsi;
-    mov [rsp+0x20],rdi -- capstone-verified, no RIP-relative insns), so the
-   trampoline can rerun an exact copy of them at entry_rsp and jmp to
-   0x14026ccf4 (push r14; sub rsp,0xa0; cookie load) with rsp == entry_rsp.
-   All four args are saved below the return address and restored.
-
-   Entry bytes: 48 89 5c 24 08 | 48 89 6c 24 10 | 48 89 74 24 18 | 48 89 7c 24 20
-   (resume at 0x14026ccf4 after the stolen 20 B) */
-static volatile LONG s_ms_hook_on = 0;
-static BYTE* s_msp_buf = nullptr;
-
-static void MatchStartHook(long long* mgr)
-{
-    if (!mgr || !s_module_base) return;
-    int world = *(int*)(s_module_base + 0x5de550);   /* DAT_1405de550 */
-    int orig  = *(int*)((char*)mgr + 0x114);
-    const PoolCfg* p = (world >= 1 && world < POOL_WORLD_MAX) ? &s_pools[world] : nullptr;
-    if (p && p->count > 0) {
-        int lvl = p->items[rand() % p->count];
-        *(int*)((char*)mgr + 0x114) = lvl;
-        Log("matchstart: world=%d(%s) orig=%d -> OVERRIDE %d (committed pool of %d)",
-            world, PoolWorldName(world), orig, lvl, p->count);
-    } else {
-        Log("matchstart: world=%d(%s) level=%d (no committed pool -- untouched)",
-            world, PoolWorldName(world), orig);
-    }
-}
-
-static void InstallMatchStartHook()
-{
-    if (!s_module_base) return;
-    const uintptr_t kEntry = 0x26cce0;             /* 0x14026cce0 - image base */
-    const uintptr_t kCont  = 0x26ccf4;             /* resume after stolen 20 B */
-    const BYTE want[20] = { 0x48,0x89,0x5C,0x24,0x08, 0x48,0x89,0x6C,0x24,0x10,
-                            0x48,0x89,0x74,0x24,0x18, 0x48,0x89,0x7C,0x24,0x20 };
-    uint8_t* entry = (uint8_t*)(s_module_base + kEntry);
-    if (memcmp(entry, want, 20) != 0) {
-        Log("matchstart: prologue mismatch (%02x %02x %02x .. %02x %02x %02x) -- REFUSED",
-            entry[0], entry[1], entry[2], entry[17], entry[18], entry[19]);
-        return;
-    }
-    BYTE* tp = (BYTE*)VirtualAlloc(nullptr, 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
-    if (!tp) { Log("matchstart: VirtualAlloc failed"); return; }
-
-    /* trampoline (rsp is entry_rsp, %16==8, [rsp]=retaddr on entry) */
-    tp[0x00]=0x48; tp[0x01]=0x81; tp[0x02]=0xEC; tp[0x03]=0x38; tp[0x04]=0; tp[0x05]=0; tp[0x06]=0;  /* sub rsp,0x38 (->%16==0) */
-    tp[0x07]=0x48; tp[0x08]=0x89; tp[0x09]=0x4C; tp[0x0a]=0x24; tp[0x0b]=0x30;                       /* mov [rsp+0x30], rcx */
-    tp[0x0c]=0x48; tp[0x0d]=0x89; tp[0x0e]=0x54; tp[0x0f]=0x24; tp[0x10]=0x28;                       /* mov [rsp+0x28], rdx */
-    tp[0x11]=0x4C; tp[0x12]=0x89; tp[0x13]=0x44; tp[0x14]=0x24; tp[0x15]=0x20;                       /* mov [rsp+0x20], r8  (REX.WR!) */
-    tp[0x16]=0x4C; tp[0x17]=0x89; tp[0x18]=0x4C; tp[0x19]=0x24; tp[0x1a]=0x18;                       /* mov [rsp+0x18], r9  */
-    int32_t relcall = (int32_t)((intptr_t)MatchStartHook - (intptr_t)(tp + 0x1b + 5));
-    tp[0x1b]=0xE8; memcpy(tp + 0x1c, &relcall, 4);                                                  /* call MatchStartHook */
-    tp[0x20]=0x48; tp[0x21]=0x8B; tp[0x22]=0x4C; tp[0x23]=0x24; tp[0x24]=0x30;                       /* mov rcx, [rsp+0x30] */
-    tp[0x25]=0x48; tp[0x26]=0x8B; tp[0x27]=0x54; tp[0x28]=0x24; tp[0x29]=0x28;                       /* mov rdx, [rsp+0x28] */
-    tp[0x2a]=0x4C; tp[0x2b]=0x8B; tp[0x2c]=0x44; tp[0x2d]=0x24; tp[0x2e]=0x20;                       /* mov r8,  [rsp+0x20] (REX.WR!) */
-    tp[0x2f]=0x4C; tp[0x30]=0x8B; tp[0x31]=0x4C; tp[0x32]=0x24; tp[0x33]=0x18;                       /* mov r9,  [rsp+0x18] */
-    tp[0x34]=0x48; tp[0x35]=0x81; tp[0x36]=0xC4; tp[0x37]=0x38; tp[0x38]=0; tp[0x39]=0; tp[0x3a]=0;  /* add rsp, 0x38 (->entry_rsp) */
-    int32_t relorig = (int32_t)(0x50 - (0x3b + 5));                                                 /* jmp ORIG20 (0x50) */
-    tp[0x3b]=0xE9; memcpy(tp + 0x3c, &relorig, 4);
-    memcpy(tp + 0x50, want, 20);                                                                    /* ORIG20: the 4 shadow stores */
-    uintptr_t cont = s_module_base + kCont;
-    tp[0x64]=0x48; tp[0x65]=0xB8; memcpy(tp + 0x66, &cont, 8);                                       /* mov rax, 0x...ccf4 */
-    tp[0x6e]=0xFF; tp[0x6f]=0xE0;                                                                    /* jmp rax           */
-    s_msp_buf = tp;
-
-    DWORD oldProt = 0;
-    uint8_t* page = (uint8_t*)((uintptr_t)entry & ~0xFFFULL);
-    if (!VirtualProtect(page, 4096, PAGE_READWRITE, &oldProt)) {
-        Log("matchstart: VirtualProtect failed: %lu", GetLastError()); return;
-    }
-    /* entry patch: mov rax, imm64(tp) ; jmp rax  (12 bytes; rest stays untouched) */
-    entry[0]=0x48; entry[1]=0xB8; memcpy(entry + 2, &tp, 8);
-    entry[10]=0xFF; entry[11]=0xE0;
-    DWORD dummy = 0;
-    VirtualProtect(page, 4096, oldProt, &dummy);
-    InterlockedExchange(&s_ms_hook_on, 1);
-    Log("matchstart: INSTALLED entry=%p tp=%p (override mgr+0x114, rerun prologue, jmp -> %p)",
-        (void*)entry, (void*)tp, (void*)cont);
 }
 
 /* file-API IAT hooks: runtime path log (match-start diagnostics)      */
@@ -1088,23 +680,10 @@ static void DrawUI()
     }
     if (pl_err[0])
         ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "commit refused: %s", pl_err);
-    PoolStats& ps = s_stats[sel_world];
-    char pl_sum[160];
     if (s_pools[sel_world].count > 0) {
-        snprintf(pl_sum, sizeof pl_sum, "LIVE  %d/%d  (stock=%d, hits=%d, clamped=%d)",
-                 s_pools[sel_world].count, sel_world == 1 ? 9 : 8,
-                 ps.stockCount, ps.hits, ps.clamped);
-        ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f), pl_sum);
-    } else if (ps.hits < 0) {
-        snprintf(pl_sum, sizeof pl_sum, "stock pool seen (count=%d) -- commit a set to override", ps.stockCount);
-        ImGui::TextDisabled(pl_sum);
+        ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.4f, 1.0f), "committed: %d levels", s_pools[sel_world].count);
     } else {
-        ImGui::TextDisabled("no pool committed -- stock behaviour; no versus loads observed yet");
-    }
-    if (!s_tp_note[0] && s_pool_hook_on) {
-        ImGui::TextDisabled("hook: installed (FUN_140030ee0)     ");
-    } else {
-        ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "hook: %s", s_tp_note[0] ? s_tp_note : "not installed");
+        ImGui::TextDisabled("no pool committed -- stock behaviour");
     }
     ImGui::End();
 }
@@ -1144,42 +723,42 @@ static int Ad2HookedSwap(void* window)
 /* ------------------------------------------------------------------ */
 /* worker: locate IAT slot, patch, poll hotkey                         */
 /* ------------------------------------------------------------------ */
-/* watchdog: re-verify the 12-byte entry patch every ~600ms so a lazy
-   VMP re-write (or anything else) shows up in the log immediately */
-static void PoolHookVerifyTick()
+
+/* UNPACK GATE -- suspended-inject support -------------------------- */
+/* When ad2ui.dll is loaded via a suspended start (ad2launch.exe), the
+   VMP stub has NOT run yet: the game's sections are still ciphertext,
+   so every runtime-byte check (prologues, IAT slot contents) sees the
+   packed image. Poll until the unpacked image is verifiable -- we use
+   the 20-byte shadow-register-store prologue at RVA 0x26cce0
+   (capstone-verified against the unpacked PE; its presence at runtime
+   is confirmed by the live log history). In the manual-inject flow
+   (game already running) the gate passes on the first check. */
+static bool WaitUnpacked()
 {
-    if (s_pool_hook_on && s_module_base) {
-        uint8_t* entry = (uint8_t*)(s_module_base + 0x30ee0);
-        if (entry[0] != 0x48 || entry[1] != 0xB8 ||
-            memcmp(entry + 2, &s_tp_buf, 8) != 0 || entry[10] != 0xFF || entry[11] != 0xE0) {
-            Log("poolhook: !!! ENTRY BYTES CORRUPTED (%02x %02x .. %02x %02x) -- hook dead",
-                entry[0], entry[1], entry[10], entry[11]);
-            InterlockedExchange(&s_pool_hook_on, 0);
+    const BYTE want[20] = { 0x48,0x89,0x5C,0x24,0x08, 0x48,0x89,0x6C,0x24,0x10,
+                            0x48,0x89,0x74,0x24,0x18, 0x48,0x89,0x7C,0x24,0x20 };
+    const uint8_t* p = (const uint8_t*)(s_module_base + 0x26cce0);
+    LARGE_INTEGER t0; QueryPerformanceCounter(&t0);
+    LARGE_INTEGER frq; QueryPerformanceFrequency(&frq);
+    int logged = 0;
+    for (int i = 0; i < 450; i++) {                 /* 450 * 200 ms = 90 s */
+        if (memcmp(p, want, 20) == 0) {
+            LARGE_INTEGER t1; QueryPerformanceCounter(&t1);
+            double dt = (double)(t1.QuadPart - t0.QuadPart) / frq.QuadPart;
+            Log("unpackgate: UNPACKED after %.2fs -- runtime code bytes verified", dt);
+            return true;
         }
+        if (i % 25 == 0 && logged++ < 10)
+            Log("unpackgate: still packed (attempt %d) ...", i);
+        Sleep(200);
     }
-    if (s_open_hook_on && s_module_base) {
-        uint8_t* entry = (uint8_t*)(s_module_base + 0x445388);
-        if (entry[0] != 0x48 || entry[1] != 0xB8 ||
-            memcmp(entry + 2, &s_otp_buf, 8) != 0 || entry[10] != 0xFF || entry[11] != 0xE0) {
-            Log("openlog: !!! ENTRY BYTES CORRUPTED (%02x %02x .. %02x %02x) -- hook dead",
-                entry[0], entry[1], entry[10], entry[11]);
-            InterlockedExchange(&s_open_hook_on, 0);
-        }
-    }
-    if (s_ms_hook_on && s_module_base) {
-        uint8_t* entry = (uint8_t*)(s_module_base + 0x26cce0);
-        if (entry[0] != 0x48 || entry[1] != 0xB8 ||
-            memcmp(entry + 2, &s_msp_buf, 8) != 0 || entry[10] != 0xFF || entry[11] != 0xE0) {
-            Log("matchstart: !!! ENTRY BYTES CORRUPTED (%02x %02x .. %02x %02x) -- hook dead",
-                entry[0], entry[1], entry[10], entry[11]);
-            InterlockedExchange(&s_ms_hook_on, 0);
-        }
-    }
+    Log("unpackgate: TIMEOUT -- bytes at +0x26cce0 = %02x %02x %02x .. %02x %02x %02x",
+        p[0], p[1], p[2], p[17], p[18], p[19]);
+    return false;
 }
 
 static DWORD WINAPI Worker(LPVOID)
 {
-    Sleep(1500); /* let the game settle past injection */
     s_module_base = (uintptr_t)GetModuleHandleA(nullptr);
 
     Log("session: ad2ui build %s %s | pid=%lu | module_base=%p",
@@ -1202,9 +781,22 @@ static DWORD WINAPI Worker(LPVOID)
         } else Log("session: ReadProcessCommandLine not resolvable");
     }
 
-    HMODULE s3 = GetModuleHandleA("SDL3.dll");
+    /* suspended-inject: wait until VMP has unpacked the image in place
+       before trusting ANY runtime bytes (IAT slot scan, patches). */
+    if (!WaitUnpacked()) {
+        Log("worker: ABORTING -- game not unpacked, refusing to patch packed bytes");
+        return 1;
+    }
+
+    /* SDL3.dll loads early in the game's own startup; under suspended
+       inject it may not exist yet, so poll. */
+    HMODULE s3 = nullptr;
+    for (int i = 0; i < 450 && !s3; i++) {          /* up to 90 s */
+        s3 = GetModuleHandleA("SDL3.dll");
+        if (!s3) Sleep(200);
+    }
     Log("worker: module_base=%p SDL3.dll=%p", (void*)s_module_base, (void*)s3);
-    if (!s3) { Log("worker: SDL3.dll NOT loaded?? giving up"); return 1; }
+    if (!s3) { Log("worker: SDL3.dll NOT loaded after 90s -- giving up"); return 1; }
 
     s_sdl_get_window_props = (FnSdlGetWindowProperties)GetProcAddress(s3, "SDL_GetWindowProperties");
     s_sdl_get_pointer_prop = (FnSdlGetPointerProperty)GetProcAddress(s3, "SDL_GetPointerProperty");
@@ -1251,18 +843,13 @@ static DWORD WINAPI Worker(LPVOID)
         (void*)s_orig_swap, (void*)page, oldProt);
     Log("worker: level-pool overlay ready (Ctrl+Alt+U toggles UI)\n");
 
-    /* ground truth: log every dir scan / mkdir the game performs */
-
-    /* versus level-pool inline hook (re/LEVEL_POOL.md) */
-    PoolInstallWorker();
+    /* file-API IAT hooks: runtime path log (match-start diagnostics) */
     InstallFileApiHooks();
 
-    /* hotkey poll: Ctrl+Alt+U toggles UI; pool-hook re-verify every ~600ms */
+    /* hotkey poll: Ctrl+Alt+U toggles UI */
     bool prev = false;
-    int wd_ms = 0;
     for (;;) {
         Sleep(80);
-        if ((wd_ms += 80) >= 600) { wd_ms = 0; PoolHookVerifyTick(); }
         bool d = KeyDown(VK_CONTROL) && KeyDown(VK_MENU) && KeyDown('U');
         if (d && !prev) {
             s_show_ui = !s_show_ui;

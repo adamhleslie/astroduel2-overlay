@@ -26,3 +26,8 @@ add_executable(inject
     inject.c)   # WIN32_LEAN_AND_MEAN is #defined in-source
 target_compile_options(inject PRIVATE /W3)
 target_link_libraries(inject PRIVATE kernel32)
+
+add_executable(ad2launch
+    ad2launch.c)   # WIN32_LEAN_AND_MEAN is #defined in-source
+target_compile_options(ad2launch PRIVATE /W3)
+target_link_libraries(ad2launch PRIVATE kernel32)
