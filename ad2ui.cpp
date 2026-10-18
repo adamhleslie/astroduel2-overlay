@@ -8,6 +8,12 @@
  *             per-world level-count switch (which call site fired,
  *             worldType). WdHook returns the original's result via
  *             MinHook's trampoline; no override logic yet (phase 1).
+ *     FnlHook @ 0x140030ee0 FUN_140030ee0 -- the per-match versus level
+ *             load funnel. Runs the original via MinHook's trampoline,
+ *             then logs world/gate/idx + the pool array the body just
+ *             consumed (same model as the old log-only funnelhook: this
+ *             hook does not write anything). Phase 1 adds the idx
+ *             clamp / pool replacement (re/MINHOOK.md).
  *   The hand-rolled counthook/funnelhook trampolines (buggy: rax lost at
  *   the ret, re/LEVEL_POOL.md #10) are no longer installed and the old
  *   1-byte mines-count patch was removed in this phase. re/MINHOOK.md
@@ -750,6 +756,15 @@ static void*        s_orig_wd = nullptr;      /* MinHook trampoline = original f
 static volatile LONG s_wd_state = 0;          /* 0=off/failed, 1=installed+enabled */
 static int s_wd_revert_logged = 0;
 
+/* funnel (0x140030ee0) field offsets -- decompilation-verified 2026-10-18:
+   DAT_1405de4cf one-shot versus gate; world = DAT_1405de484 (fallback
+   *(FUN_140193290()+0x454) when DAT_1405de607==0, applied INSIDE the body);
+   mgr+0x380 = caller's index (written before the call); mgr+0x4A0/+0x4A8
+   = poolStart/poolEnd (int32 array, count = len/4). */
+static void*        s_orig_fnl = nullptr;
+static volatile LONG s_fnl_state = 0;
+static int s_fnl_revert_logged = 0;
+
 typedef void* (*FnWorldData)(void* out, int worldType);
 
 static void* WdHook(void* out, int worldType)
@@ -787,16 +802,83 @@ static bool InstallWdHook()
     return true;
 }
 
-/* ~5s worker-loop check: the entry must still be our E9 rel32. If VMP
-   re-writes it the hook has silently disengaged (stock behavior). Phase 0:
-   log only, no re-arm. */
-static void VerifyWdHookEntry()
+/* ------------------------------------------------------------------ */
+/* MinHook phase 0.5: LOG-ONLY hook on the versus level-load funnel    */
+/* (0x140030ee0, rcx = mgr). Mirrors the old hand-rolled funnelhook's  */
+/* diagnostic -- world, gate, the caller's index, and the pool array   */
+/* the body will index -- but with MinHook doing the trampoline and    */
+/* ZERO behavioral change (the original runs first, then we log).      */
+/* Phase 1 promotes this hook to the clamp/replace: log-before-call +  */
+/* idx fix before the trampoline call (re/MINHOOK.md Phase 1.3).       */
+/* ------------------------------------------------------------------ */
+typedef void (*FnFunnel)(void* mgr);
+
+static void FnlHook(void* mgr)
 {
-    if (InterlockedCompareExchange(&s_wd_state, 0, 0) != 1) return;
-    uint8_t* p = (uint8_t*)(s_module_base + 0x2AE190);
-    if (p[0] != 0xE9 && s_wd_revert_logged++ < 3)
-        Log("wd: entry REVERTED (bytes %02x %02x %02x %02x) -- VMP? hook disengaged, stock behavior",
-            p[0], p[1], p[2], p[3]);
+    if (s_orig_fnl)
+        ((FnFunnel)s_orig_fnl)(mgr);           /* stock funnel first, unchanged */
+    else
+        Log("fnl: FATAL -- no trampoline; original funnel NOT run");
+
+    uintptr_t m = (uintptr_t)mgr;
+    if (!mgr || m < 0x10000 || (m & 7)) { Log("fnl: bad mgr %p -- skipped", (void*)m); return; }
+    uintptr_t b = s_module_base;
+    int world = (int)*(volatile int32_t*)(b + 0x5DE484);
+    int gate  = (int)*(volatile uint8_t*)(b + 0x5DE4CF);
+    int idx   = (int)*(volatile int32_t*)(m + 0x380);
+    uintptr_t ps = *(volatile uintptr_t*)(m + 0x4A0);
+    uintptr_t pe = *(volatile uintptr_t*)(m + 0x4A8);
+    Log("fnl: world=%d(%s) gate=%d idx=%d pool=%p..%p",
+        world, PoolWorldName(world), gate, idx, (void*)ps, (void*)pe);
+    if (ps >= 0x10000 && pe >= ps && (pe - ps) <= 256) {
+        int n = (int)((pe - ps) / 4);
+        char buf[256]; int out = 0;
+        const int32_t* arr = (const int32_t*)ps;
+        int dumpn = n > 24 ? 24 : n;
+        for (int i = 0; i < dumpn && out < 240; i++)
+            out += snprintf(buf + out, sizeof(buf) - out, "%s%d", i ? "," : "", arr[i]);
+        int level = (idx >= 0 && idx < n) ? arr[idx] : -1;
+        Log("fnl:   poolN=%d pool=[%s]  level=%d%s",
+            n, buf, level, (idx < 0 || idx >= n) ? "  (idx OOB -- stock would fastfail)" : "");
+    } else {
+        Log("fnl:   pool pointers out of range -- not dumping");
+    }
+}
+
+static bool InstallFnlHook()
+{
+    void* target = (void*)(s_module_base + 0x30EE0);
+    if (MH_CreateHook(target, (LPVOID)FnlHook, &s_orig_fnl) != MH_OK) {
+        Log("fnl: MH_CreateHook FAILED -- REFUSED, stock behavior");
+        return false;
+    }
+    if (MH_EnableHook(target) != MH_OK) {
+        Log("fnl: MH_EnableHook FAILED -- MH_RemoveHook, stock behavior");
+        MH_RemoveHook(target);
+        return false;
+    }
+    s_fnl_state = 1;
+    Log("fnl: INSTALLED target=%p trampoline=%p", target, s_orig_fnl);
+    return true;
+}
+
+/* ~5s worker-loop check (both MinHook entries): the entry must still be
+   our E9 rel32. If VMP re-writes it the hook has silently disengaged
+   (stock behavior). Phase 0: log only, no re-arm. */
+static void VerifyEntryHooks()
+{
+    if (InterlockedCompareExchange(&s_wd_state, 0, 0) == 1) {
+        uint8_t* p = (uint8_t*)(s_module_base + 0x2AE190);
+        if (p[0] != 0xE9 && s_wd_revert_logged++ < 3)
+            Log("wd: entry REVERTED (bytes %02x %02x %02x %02x) -- VMP? hook disengaged, stock behavior",
+                p[0], p[1], p[2], p[3]);
+    }
+    if (InterlockedCompareExchange(&s_fnl_state, 0, 0) == 1) {
+        uint8_t* p = (uint8_t*)(s_module_base + 0x30EE0);
+        if (p[0] != 0xE9 && s_fnl_revert_logged++ < 3)
+            Log("fnl: entry REVERTED (bytes %02x %02x %02x %02x) -- VMP? hook disengaged, stock behavior",
+                p[0], p[1], p[2], p[3]);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -1192,12 +1274,17 @@ static DWORD WINAPI Worker(LPVOID)
        patch was removed entirely in this phase. */
     InstallWdHook();
 
+    /* MinHook phase 0.5: log-only funnel hook (re/MINHOOK.md Phase 1.3,
+      first pass). Same shape as the old log-only funnelhook, MinHook-
+      trampolined; the hand-rolled InstallEntryHooks() stays disabled. */
+    InstallFnlHook();
+
     /* hotkey poll: Ctrl+Alt+U toggles UI */
     bool prev = false;
     int tick = 0;
     for (;;) {
         Sleep(80);
-        if ((++tick % 62) == 0) VerifyWdHookEntry();   /* ~5s: entry still ours? */
+        if ((++tick % 62) == 0) VerifyEntryHooks();    /* ~5s: entries still ours? */
         /* if ((++tick % 62) == 0) VerifyEntryPatches(); */
         bool d = KeyDown(VK_CONTROL) && KeyDown(VK_MENU) && KeyDown('U');
         if (d && !prev) {
