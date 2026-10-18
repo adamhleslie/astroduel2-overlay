@@ -731,15 +731,17 @@ static void VerifyEntryPatches()
 }
 
 /* ------------------------------------------------------------------ */
-/* Basic .text patch test: mines count 9 -> 1 (1 byte, no trampoline)  */
+/* Basic .text patch test: mines count 9 -> 2 (1 byte, no trampoline)  */
 /* FUN_1402ae190 worldDataForType, case worldType==1 (mines):          */
 /*   0x1402ae1c4: B8 09 00 00 00  mov eax, 9   (count -> out[3])       */
-/*   0x1402ae1c5 holds the `9`. Flip to 0x01 (1). The preload loop     */
+/*   0x1402ae1c5 holds the `9`. Flip to 0x02 (2). The preload loop     */
 /*   (FUN_140013c00) and the picker both iterate i = 1..*(int*)(out+0xC) */
-/*   so both see 1: preload loads only mines1.tmx, and every match     */
-/*   must draw level 1. Pure 1-byte immediate edit: no                 */
-/*   registers, alignment, branches or calls -- isolates whether .text  */
-/*   tamper itself survives VMP (the 23:20 trampoline crash suspect).  */
+/*   so both see 2: pool = [1,2]. Tests the match-start pick counter   */
+/*   in 2P vs 3P: does pickIndex advance+wrap across matches, or is it  */
+/*   random? Level = pool[pickIndex] = pickIndex + 1. count=1 froze on  */
+/*   the 2nd match (pickIndex advanced past the 1-element pool ->       */
+/*   "invalid vector subscript" halt); count=2 should survive the      */
+/*   2-player counter and expose the 3-player behavior.                */
 /* ------------------------------------------------------------------ */
 static uint8_t s_mc_orig = 0;
 static int s_mc_bad = 0;
@@ -754,8 +756,8 @@ static bool PatchMinesCount()
     uint8_t* p = MinesCountByte();
     if (!p) { Log("minescount: no module base"); return false; }
     uint8_t* inst = p - 1;                        /* B8 xx 00 00 00 */
-    if (inst[0] == 0xB8 && p[0] == 0x01) {
-        Log("minescount: already patched (0x01) -- nothing to do");
+    if (inst[0] == 0xB8 && p[0] == 0x02) {
+        Log("minescount: already patched (0x02) -- nothing to do");
         s_mc_orig = 0x09;
         return true;
     }
@@ -771,18 +773,18 @@ static bool PatchMinesCount()
         return false;
     }
     s_mc_orig = p[0];
-    p[0] = 0x01;
+    p[0] = 0x02;
     DWORD dummy = 0;
     VirtualProtect(page, 4096, old, &dummy);
-    Log("minescount: PATCHED +0x2ae1c5 0x%02x -> 0x01 (mines pool 9 -> 1)", s_mc_orig);
+    Log("minescount: PATCHED +0x2ae1c5 0x%02x -> 0x02 (mines pool 9 -> 2)", s_mc_orig);
     return true;
 }
 
 static void VerifyMinesCount()
 {
     uint8_t* p = MinesCountByte();
-    if (p && p[0] != 0x01 && s_mc_bad++ < 3)
-        Log("minescount: byte REVERTED to 0x%02x (want 0x01) -- VMP re-wrote .text?", p[0]);
+    if (p && p[0] != 0x02 && s_mc_bad++ < 3)
+        Log("minescount: byte REVERTED to 0x%02x (want 0x02) -- VMP re-wrote .text?", p[0]);
 }
 
 /* ------------------------------------------------------------------ */
