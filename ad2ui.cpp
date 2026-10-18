@@ -1,13 +1,17 @@
 /* ad2ui.cpp -- in-game ImGui overlay for Astro Duel 2 (WREngine / cocos2d-x 3.17.X, SDL3)
  *
- * Current state (simple test build):
- *   IAT-only patching. The four trampoline inline hooks (pool/poolhook,
- *   openlog, pathbuild, matchstart -- the old level-pool-override attempt,
- *   see re/LEVEL_POOL.md and re/CUSTOM_LEVELS.md) are REMOVED: they were
- *   the dead approach and every one of them wrote into VMP-protected game
- *   code. What remains: the SDL_GL_SwapWindow IAT hook (overlay) and the
+ * Current state (two-hook diagnostic build):
+ *   IAT hooks: the SDL_GL_SwapWindow IAT hook (overlay) and the
  *   kernel32/shell32 file-API IAT log hooks (dir scans, mkdirs, opens).
- *   All diagnostics -> %LOCALAPPDATA%\AstroDuel2Mod\probe_ui.log.
+ *   PLUS two LOG-ONLY inline entry hooks (trampolines, prologue-verified,
+ *   zero behavioral change) for the level-pool pipeline:
+ *     counthook  @ 0x1402ae190 WorldDataLoader::worldDataForType -- the
+ *                 per-world level-count switch (which call site fired,
+ *                 worldType, count).
+ *     funnelhook @ 0x140030ee0 per-match versus level-load funnel -- the
+ *                 caller's world/idx and the live pool int array.
+ *   See re/LEVEL_POOL.md + re/CUSTOM_LEVELS.md. All diagnostics ->
+ *   %LOCALAPPDATA%\AstroDuel2Mod\probe_ui.log.
  *
  *   UNPACK GATE: the DLL can now be loaded via a SUSPENDED start
  *   (ad2launch.exe: CreateProcess(CREATE_SUSPENDED) -> LoadLibrary ->
@@ -467,6 +471,266 @@ static void InstallFileApiHooks()
 }
 
 /* ------------------------------------------------------------------ */
+/* log-only entry hooks: level-pool pipeline diagnostics               */
+/* (re/LEVEL_POOL.md, re/CUSTOM_LEVELS.md)                             */
+/*                                                                     */
+/* Two inline entry hooks on one RWX trampoline page. Per hook:        */
+/*   entry : 48 B8 <imm64 tp> FF E0   (absolute jmp, 13 B)             */
+/*   tp    : <stolen prologue> <arg save> <call Hook> <arg restore>    */
+/*           <48 B8 <imm64 entry+N> FF E0>                            */
+/* Prologue bytes are verified at runtime (REFUSE -> no patch, game    */
+/* untouched) and re-verified in the worker loop. Zero behavioral      */
+/* change: every register the body depends on at entry+N is restored;  */
+/* the hooks only read and log.                                        */
+/*                                                                     */
+/* counthook  @ 0x1402ae190 WorldDataLoader::worldDataForType(out,wt) */
+/*   Prologue is 9 B (40 53 push rbx / sub rsp,0x20 / 48 8B D9        */
+/*   mov rbx,rcx) but the 13 B entry patch overruns it (cmp edx,0x10  */
+/*   at +9, ja at +0xc), so the trampoline re-emits that cmp+ja       */
+/*   (ja in absolute form, target 0x1402ae2bf) and lands at           */
+/*   entry+0x12 (movsxd rax,edx),                                     */
+/*   where rax is redefined before first use. At the call point        */
+/*   rsp = S-0x28 (0 mod 16, S = post-retaddr-push rsp); the original  */
+/*   retaddr sits at [rsp+0x28] (read into r8, the 3rd ABI arg); args  */
+/*   are (rcx=out, rdx=wt, r8=retaddr). The hook may clobber rcx/rdx   */
+/*   (ABI caller-saved), so `push rdx; push rcx` before the call and   */
+/*   `pop rcx; pop rdx` after restore both -- the body from +0x12 uses */
+/*   rdx (movsxd rax,rdx) and stores the result through rcx.           */
+/*                                                                     */
+/* funnelhook @ 0x140030ee0 (mgr)                                     */
+/*   The 24 B prologue (mov rax,rsp / 3 shadow stores / 5 pushes) ends */
+/*   exactly at entry+24, where `lea rbp,[rax-0x198]` + the movaps     */
+/*   spill block need rax = pre-prologue rsp R, and the body first     */
+/*   reads param_1 from rcx at +0xf56 (the prologue does not save      */
+/*   it). `push rax; push rcx` before the call, popped back after,     */
+/*   protects both. (The old build's epilogue `mov rcx,rax` left rax   */
+/*   = hook return = mgr -- wild movaps writes to [mgr-0x38..] and a   */
+/*   frame base of mgr-0x198. Never fired in a recorded session; this  */
+/*   push/pop design removes the hazard entirely.)                     */
+/* ------------------------------------------------------------------ */
+
+static BYTE* s_hook_page = nullptr;     /* one RWX page, both trampolines */
+
+struct EntryPatch {
+    const char* tag; uintptr_t rva; bool patched; int bad;
+};
+static EntryPatch s_ep[2] = {
+    { "counthook",  0x2ae190, false, 0 },
+    { "funnelhook", 0x30ee0,  false, 0 },
+};
+
+/* append `jmp target` (absolute, 13 B) at tp+off; returns new off */
+static size_t EmitAbsJmp(BYTE* tp, size_t off, uintptr_t target)
+{
+    tp[off] = 0x48; tp[off+1] = 0xB8;
+    memcpy(tp + off + 2, &target, 8);
+    tp[off+10] = 0xFF; tp[off+11] = 0xE0;
+    return off + 13;
+}
+
+/* append `call fn` at tp+off: E8 rel32 when in range, else absolute
+   `jmp rax; ret` is NOT used (ret would go to the wrong place) -- fall
+   back to `mov rax,fn; call rax` (12 B, clobbers rax only). */
+static size_t EmitCall(BYTE* tp, size_t off, void* fn)
+{
+    int64_t d = (int64_t)fn - (int64_t)(tp + off + 5);
+    if (d >= INT32_MIN && d <= INT32_MAX) {
+        int32_t r = (int32_t)d;
+        tp[off] = 0xE8; memcpy(tp + off + 1, &r, 4);
+        return off + 5;
+    }
+    tp[off] = 0x48; tp[off+1] = 0xB8; memcpy(tp + off + 2, &fn, 8);
+    tp[off+10] = 0xFF; tp[off+11] = 0xD0;       /* call rax */
+    return off + 12;
+}
+
+/* append `ja target` at tp+off as `76 0C; 48 B8 imm64; FF E0` (14 B).
+   rel32 can't span the DLL<->game-module distance (tens of TB), so the
+   branch is inverted (jbe +12 = NOT ja) and the taken path uses an
+   absolute jmp. Semantics after `cmp edx,0x10`: CF=0,ZF=0 (edx>0x10)
+   -> target; else fallthrough. */
+static size_t EmitJaAbs(BYTE* tp, size_t off, uintptr_t target)
+{
+    tp[off]   = 0x76; tp[off+1] = 0x0C;              /* jbe +12 (skip) */
+    tp[off+2] = 0x48; tp[off+3] = 0xB8;
+    memcpy(tp + off + 4, &target, 8);
+    tp[off+12] = 0xFF; tp[off+13] = 0xE0;
+    return off + 14;
+}
+
+/* verify prologue + emit the 13 B absolute jmp at entry */
+static bool PatchEntry(EntryPatch& ep, const BYTE* want, size_t wantLen, BYTE* tp)
+{
+    uint8_t* entry = (uint8_t*)(s_module_base + ep.rva);
+    if (memcmp(entry, want, wantLen) != 0) {
+        Log("%s: REFUSED -- prologue mismatch at +0x%lx (%02x %02x %02x %02x ..)",
+            ep.tag, (unsigned long)ep.rva, entry[0], entry[1], entry[2], entry[3]);
+        return false;
+    }
+    DWORD oldProt = 0;
+    uint8_t* page = (uint8_t*)((uintptr_t)entry & ~0xFFFULL);
+    if (!VirtualProtect(page, 4096, PAGE_READWRITE, &oldProt)) {
+        Log("%s: VirtualProtect(%p) FAILED %lu", ep.tag, (void*)entry, GetLastError());
+        return false;
+    }
+    entry[0] = 0x48; entry[1] = 0xB8;
+    memcpy(entry + 2, &tp, 8);
+    entry[10] = 0xFF; entry[11] = 0xE0;
+    DWORD dummy = 0;
+    VirtualProtect(page, 4096, oldProt, &dummy);
+    ep.patched = true;
+    Log("%s: INSTALLED entry=%p tp=%p", ep.tag, (void*)entry, (void*)tp);
+    return true;
+}
+
+/* ---- counthook ---- */
+/* WorldDataLoader::worldDataForType writes {d0,d1,d2,d3} into the
+   caller's 16 B buffer (rcx); d3 (offset 0xc) is the per-world level
+   COUNT -- both key call sites loop on *(int*)(out+0xc): the preload
+   loop (call at 0x140013d5a) and the picker (call at 0x1400327ee).
+   The hook fires at entry, before the buffer is filled, so it logs
+   worldType + the original return address (which call site) and the
+   count computed from a copy of the switch below. */
+static int WorldDataCount(int t)
+{
+    switch (t) {
+    case 1:  case 5:  case 7:              return 9;
+    case 2:  case 3:  case 4:  case 6:     
+    case 8:  case 9:                       return 8;
+    case 0:  case 0xc: case 0xe:           return 1;
+    case 0xa: case 0xb: case 0xd:          
+    case 0xf: case 0x10:                   return 0xd;
+    default:                               return -1; /* game aborts */
+    }
+}
+
+static const char* CountRetSite(uintptr_t ret)
+{
+    if (!s_module_base) return "";
+    uintptr_t rva = ret - s_module_base;   /* ret = call site + 5 */
+    switch (rva) {
+    case 0x13d5f: return "preload loop";        /* call 0x140013d5a, FUN_140013c00 */
+    case 0x327f3: return "picker/match";        /* call 0x1400327ee */
+    case 0x8d3a4: return "coop pathbuilder";    /* call 0x14008d39f */
+    case 0x19745c: return "init";               /* call 0x140197457 */
+    case 0x26bab8: return "getLevelString";     /* call 0x14026bab3 */
+    default: return "other";
+    }
+}
+
+static void CountHook(void* out, int worldType, uintptr_t retAddr)
+{
+    uintptr_t ret = retAddr;
+    Log("counthook: world=%d(%s) count=%d site=%s(+0x%lx) out=%p",
+        worldType, PoolWorldName(worldType), WorldDataCount(worldType),
+        CountRetSite(ret), (unsigned long)(ret ? ret - s_module_base : 0), out);
+}
+
+static bool InstallCountHook()
+{
+    const uintptr_t kRva = s_ep[0].rva;
+    const uintptr_t kCont = kRva + 0x12;                 /* movsxd rax,edx  */
+    const uintptr_t kJaTarget = kRva + 0x12f;            /* 0x1402ae2bf     */
+    const BYTE want[9] = { 0x40,0x53, 0x48,0x83,0xEC,0x20, 0x48,0x8B,0xD9 };
+    uint8_t* entry = (uint8_t*)(s_module_base + kRva);
+
+    BYTE* tp = s_hook_page;
+    memcpy(tp, entry, 9);                                 /* +0x00 stolen prologue */
+    tp[9] = 0x83; tp[10] = 0xFA; tp[11] = 0x10;           /* +0x09 cmp edx,0x10 */
+    size_t o = EmitJaAbs(tp, 12, s_module_base + kJaTarget); /* +0x0c ja (abs form) */
+    /* rsp = S-0x28 (0 mod 16) here. r8 = retaddr for the hook.          */
+    tp[o]=0x4C; tp[o+1]=0x8B; tp[o+2]=0x44; tp[o+3]=0x24; tp[o+4]=0x28; /* mov r8,[rsp+0x28] */
+    o += 5;
+    tp[o] = 0x52; o += 1;                                 /* push rdx (protect worldType) */
+    tp[o] = 0x51; o += 1;                                 /* push rcx (protect out)     */
+    o = EmitCall(tp, o, (void*)CountHook);                /* call; rcx=out rdx=wt r8=ret  */
+    tp[o] = 0x59; o += 1;                                 /* pop rcx (out)          */
+    tp[o] = 0x52; o += 1;                                 /* pop rdx -> rsp = S-0x28 again */
+    EmitAbsJmp(tp, o, s_module_base + kCont);
+    return PatchEntry(s_ep[0], want, 9, tp);
+}
+
+/* ---- funnelhook ---- */
+static void FunnelHook(void* mgr)
+{
+    uintptr_t m = (uintptr_t)mgr;
+    if (!mgr || m < 0x10000 || (m & 7)) {
+        Log("funnelhook: bad mgr %p -- skipped", (void*)m); return;
+    }
+    uintptr_t b = s_module_base;
+    int world = (int)*(volatile int32_t*)(b + 0x5DE484);   /* DAT_1405de484 */
+    int gate  = (int)*(volatile uint8_t*)(b + 0x5DE4CF);   /* DAT_1405de4cf */
+    int idx   = (int)*(volatile int32_t*)(m + 0x380);      /* caller's pick */
+    uintptr_t ps = *(volatile uintptr_t*)(m + 0x4A0);      /* poolStart     */
+    uintptr_t pe = *(volatile uintptr_t*)(m + 0x4A8);      /* poolEnd       */
+    Log("funnelhook: world=%d(%s) gate=%d idx=%d pool=%p..%p",
+        world, PoolWorldName(world), gate, idx, (void*)ps, (void*)pe);
+    if (ps >= 0x10000 && pe >= ps && (pe - ps) <= 256) {
+        int n = (int)((pe - ps) / 4);
+        if (n > 24) n = 24;
+        char buf[256]; int out = 0;
+        const int32_t* arr = (const int32_t*)ps;
+        for (int i = 0; i < n && out < 240; i++)
+            out += snprintf(buf + out, sizeof(buf) - out, "%s%d", i ? "," : "", arr[i]);
+        Log("funnelhook:   poolN=%d pool=[%s]", n, buf);
+    } else {
+        Log("funnelhook:   pool pointers out of range -- not dumping");
+    }
+}
+
+static bool InstallFunnelHook()
+{
+    const uintptr_t kRva = s_ep[1].rva;
+    const uintptr_t kCont = kRva + 0x18;                   /* lea rbp,[rax-0x198] */
+    const BYTE want[24] = { 0x48,0x8b,0xc4, 0x48,0x89,0x58,0x10, 0x48,0x89,0x70,0x18,
+                            0x48,0x89,0x78,0x20, 0x55, 0x41,0x54, 0x41,0x55,
+                            0x41,0x56, 0x41,0x57 };
+    uint8_t* entry = (uint8_t*)(s_module_base + kRva);
+
+    BYTE* tp = s_hook_page + 0x100;                        /* second slot on the page */
+    memcpy(tp, entry, 24);                                 /* +0x00 stolen prologue   */
+    /* rsp = R-0x28 (0 mod 16) here; rax = R, rcx = mgr. Two pushes     */
+    /* protect both across the call and keep the call point 0 mod 16,  */
+    /* so the hook gets the required 8 mod 16. Popped back before the  */
+    /* jmp (that stack region is scratch -- the body's own spills      */
+    /* overwrite it after `sub rsp,0x270`).                            */
+    tp[24] = 0x50;                                         /* +0x18 push rax          */
+    tp[25] = 0x51;                                         /* +0x19 push rcx          */
+    size_t o = EmitCall(tp, 26, (void*)FunnelHook);        /* +0x1a call FunnelHook   */
+    tp[o] = 0x59; o += 1;                                  /* +0x1f pop rcx (mgr)     */
+    tp[o] = 0x58; o += 1;                                  /* +0x20 pop rax (R)       */
+    EmitAbsJmp(tp, o, s_module_base + kCont);
+    return PatchEntry(s_ep[1], want, 24, tp);
+}
+
+static bool InstallEntryHooks()
+{
+    s_hook_page = (BYTE*)VirtualAlloc(nullptr, 0x1000,
+                                      MEM_RESERVE | MEM_COMMIT, PAGE_EXECUTE_READWRITE);
+    if (!s_hook_page) { Log("entryhooks: VirtualAlloc FAILED %lu", GetLastError()); return false; }
+    bool a = InstallCountHook();
+    bool c = InstallFunnelHook();
+    Log("entryhooks: counthook=%s funnelhook=%s", a ? "ok" : "REFUSED", c ? "ok" : "REFUSED");
+    return a || c;
+}
+
+/* worker-loop re-verify: the patch must still be our 13 B absolute jmp */
+static void VerifyEntryPatches()
+{
+    for (int i = 0; i < 2; i++) {
+        EntryPatch& ep = s_ep[i];
+        if (!ep.patched) continue;
+        uint8_t* p = (uint8_t*)(s_module_base + ep.rva);
+        if (p[0] != 0x48 || p[1] != 0xB8 ||
+            *(uint64_t*)(p + 2) != (uint64_t)(i == 0 ? s_hook_page : s_hook_page + 0x100)) {
+            if (ep.bad++ < 3)
+                Log("%s: entry patch OVERWRITTEN (bytes %02x %02x %02x ..) -- VMP? "
+                    "hooks will misfire until reinstalled", ep.tag, p[0], p[1], p[2]);
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* find the game window                                                */
 /* ------------------------------------------------------------------ */
 struct WinCand { HWND h; int area; };
@@ -846,10 +1110,16 @@ static DWORD WINAPI Worker(LPVOID)
     /* file-API IAT hooks: runtime path log (match-start diagnostics) */
     InstallFileApiHooks();
 
-    /* hotkey poll: Ctrl+Alt+U toggles UI */
+    /* log-only entry hooks (counthook + funnelhook) -- must be in before
+       the ~9 s preload block, and they are: this runs ~1 s after start. */
+    InstallEntryHooks();
+
+    /* hotkey poll: Ctrl+Alt+U toggles UI; re-verify entry patches ~5 s */
     bool prev = false;
+    int tick = 0;
     for (;;) {
         Sleep(80);
+        if ((++tick % 62) == 0) VerifyEntryPatches();
         bool d = KeyDown(VK_CONTROL) && KeyDown(VK_MENU) && KeyDown('U');
         if (d && !prev) {
             s_show_ui = !s_show_ui;
