@@ -1111,15 +1111,18 @@ static DWORD WINAPI Worker(LPVOID)
     InstallFileApiHooks();
 
     /* log-only entry hooks (counthook + funnelhook) -- must be in before
-       the ~9 s preload block, and they are: this runs ~1 s after start. */
-    InstallEntryHooks();
+       the ~9 s preload block, and they are: this runs ~1 s after start.
+       DISABLED 2026-10-17: startup crash in the first live two-hook run
+       (counthook fired once at the init site, then AD2_Crash dump at
+       23:20:54). Control run: IAT hooks only, no .text patching. */
+    /* InstallEntryHooks(); */
 
-    /* hotkey poll: Ctrl+Alt+U toggles UI; re-verify entry patches ~5 s */
+    /* hotkey poll: Ctrl+Alt+U toggles UI */
     bool prev = false;
-    int tick = 0;
+    /* int tick = 0; */
     for (;;) {
         Sleep(80);
-        if ((++tick % 62) == 0) VerifyEntryPatches();
+        /* if ((++tick % 62) == 0) VerifyEntryPatches(); */
         bool d = KeyDown(VK_CONTROL) && KeyDown(VK_MENU) && KeyDown('U');
         if (d && !prev) {
             s_show_ui = !s_show_ui;
