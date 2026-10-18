@@ -175,15 +175,38 @@ static int PoolWorldId(const char* name)
 /*                                                                     */
 /* Loaded once at startup from <gamedir>/res/levels/versus/pool.json  */
 /* (the overlay DLL sits in the game dir as steam_api64.dll, so its   */
-/* module path is the base). Flat object, world name -> int:           */
-/*   { "mines": 2, "sunken": 5 }                                       */
-/* 0 = no override (stock). Count range is NOT validated here (1 is   */
-/* the fastfail poison; 12 is the live walk-pool cap) -- that check    */
-/* lives at another level. Unknown keys and non-int values are logged  */
-/* and skipped -- everything else stays stock. No file = all worlds   */
-/* stock.                                                              */
+/* module path is the base). Object, world name -> int or object:     */
+/*   { "mines": { "auto": true }, "sunken": { "count": 5 } }          */
+/*   { "mines": 2 }                                                   */
+/*   - bare int (or "count")  : explicit count.                       */
+/*   - "auto": true           : count the world's own directory       */
+/*     res/levels/versus/<world>/*.tmx, EXCLUDING the "cg_" prefix    */
+/*     (the Cash Grab variants).                                       */
+/*   - both present           : explicit "count" wins.                 */
+/* 0 / absent = no override (stock). Count range is NOT validated     */
+/* here -- that check lives at another level. Unknown keys and bad    */
+/* values are logged and skipped; no file = all worlds stock.         */
 /* ------------------------------------------------------------------ */
 static int s_pool_counts[POOL_WORLD_MAX] = {0};   /* 0 = stock */
+
+/* count <dir>\\*.tmx (files only, excluding the "cg_" prefix) */
+static int PoolDirCountTmx(const char* dirA)
+{
+    wchar_t pat[MAX_PATH + 16];
+    if (!MultiByteToWideChar(CP_ACP, 0, dirA, -1, pat, MAX_PATH + 16)) return 0;
+    wcscat(pat, L"\\*.tmx");
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) { Log("pooljson: scan FAILED for %s (err %lu)", dirA, GetLastError()); return 0; }
+    int n = 0;
+    do {
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 &&
+            _wcsnicmp(fd.cFileName, L"cg_", 3) != 0)
+            n++;
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return n;
+}
 
 static void PoolJsonLoad()
 {
@@ -213,9 +236,25 @@ static void PoolJsonLoad()
     cJSON_ArrayForEach(it, root) {
         int id = PoolWorldId(it->string ? it->string : "");
         if (!id) { Log("pooljson: unknown world %\"%s\" -- skipped", it->string); refused++; continue; }
-        if (!cJSON_IsNumber(it) || (int)it->valuedouble != it->valueint) { Log("pooljson: %s: not an int -- skipped", it->string); refused++; continue; }
-        s_pool_counts[id] = it->valueint;
+        int v = 0; bool have = false; const char* how = "";
+        if (cJSON_IsNumber(it) && (int)it->valuedouble == it->valueint) {
+            v = it->valueint; have = true; how = "count";
+        } else if (cJSON_IsObject(it)) {
+            cJSON* cnt = cJSON_GetObjectItem(it, "count");
+            cJSON* autoIt = cJSON_GetObjectItem(it, "auto");
+            if (cnt && cJSON_IsNumber(cnt) && (int)cnt->valuedouble == cnt->valueint) {
+                v = cnt->valueint; have = true; how = "count";
+            } else if (autoIt && cJSON_IsBool(autoIt) && cJSON_IsTrue(autoIt)) {
+                char dirA[MAX_PATH + 32];
+                snprintf(dirA, sizeof dirA, "%s\\res\\levels\\versus\\%s", base, PoolWorldName(id));
+                v = PoolDirCountTmx(dirA); have = true; how = "auto";
+            }
+        }
+        if (!have) { Log("pooljson: %s: no usable count/auto -- skipped", it->string); refused++; continue; }
+        s_pool_counts[id] = v;
         applied++;
+        if (strcmp(how, "auto") == 0)
+            Log("pooljson: %s: auto count = %d (scanned *.tmx minus cg_)", it->string, v);
     }
     cJSON_Delete(root);
     Log("pooljson: %s -- %d override(s), %d refused%s", path, applied, refused,
