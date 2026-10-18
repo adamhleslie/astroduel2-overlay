@@ -731,6 +731,61 @@ static void VerifyEntryPatches()
 }
 
 /* ------------------------------------------------------------------ */
+/* Basic .text patch test: mines count 9 -> 12 (1 byte, no trampoline) */
+/* FUN_1402ae190 worldDataForType, case worldType==1 (mines):          */
+/*   0x1402ae1c4: B8 09 00 00 00  mov eax, 9   (count -> out[3])       */
+/*   0x1402ae1c5 holds the `9`. Flip to 0x0C (12). The preload loop    */
+/*   (FUN_140013c00) and the picker both iterate i = 1..*(int*)(out+0xC) */
+/*   so both see 12 and load mines1..12.tmx (10-12 = copies of         */
+/*   mines2-4, staged on disk). Pure 1-byte immediate edit: no         */
+/*   registers, alignment, branches or calls -- isolates whether .text  */
+/*   tamper itself survives VMP (the 23:20 trampoline crash suspect).  */
+/* ------------------------------------------------------------------ */
+static uint8_t s_mc_orig = 0;
+static int s_mc_bad = 0;
+
+static uint8_t* MinesCountByte()
+{
+    return s_module_base ? (uint8_t*)(s_module_base + 0x2ae1c5) : nullptr;
+}
+
+static bool PatchMinesCount()
+{
+    uint8_t* p = MinesCountByte();
+    if (!p) { Log("minescount: no module base"); return false; }
+    uint8_t* inst = p - 1;                        /* B8 xx 00 00 00 */
+    if (inst[0] == 0xB8 && p[0] == 0x0C) {
+        Log("minescount: already patched (0x0c) -- nothing to do");
+        s_mc_orig = 0x09;
+        return true;
+    }
+    if (!(inst[0] == 0xB8 && p[0] == 0x09 && p[1] == 0 && p[2] == 0 && p[3] == 0)) {
+        Log("minescount: REFUSED -- bytes at +0x2ae1c4: %02x %02x %02x %02x %02x (want B8 09 00 00 00)",
+            inst[0], p[0], p[1], p[2], p[3]);
+        return false;
+    }
+    uint8_t* page = (uint8_t*)((uintptr_t)inst & ~0xFFFULL);
+    DWORD old = 0;
+    if (!VirtualProtect(page, 4096, PAGE_READWRITE, &old)) {
+        Log("minescount: VirtualProtect FAILED %lu", GetLastError());
+        return false;
+    }
+    s_mc_orig = p[0];
+    p[0] = 0x0C;
+    DWORD dummy = 0;
+    VirtualProtect(page, 4096, old, &dummy);
+    Log("minescount: PATCHED +0x2ae1c5 0x%02x -> 0x0c (mines pool 9 -> 12)", s_mc_orig);
+    return true;
+}
+
+static void VerifyMinesCount()
+{
+    uint8_t* p = MinesCountByte();
+    if (p && p[0] != 0x0C && s_mc_bad++ < 3)
+        Log("minescount: byte REVERTED to 0x%02x (want 0x0c) -- VMP re-wrote .text?", p[0]);
+}
+
+/* ------------------------------------------------------------------ */
 /* find the game window                                                */
 /* ------------------------------------------------------------------ */
 struct WinCand { HWND h; int area; };
@@ -1117,11 +1172,15 @@ static DWORD WINAPI Worker(LPVOID)
        23:20:54). Control run: IAT hooks only, no .text patching. */
     /* InstallEntryHooks(); */
 
+    /* basic .text patch test (1-byte immediate, no trampoline): mines 9->12 */
+    PatchMinesCount();
+
     /* hotkey poll: Ctrl+Alt+U toggles UI */
     bool prev = false;
-    /* int tick = 0; */
+    int tick = 0;
     for (;;) {
         Sleep(80);
+        if ((++tick % 62) == 0) VerifyMinesCount();
         /* if ((++tick % 62) == 0) VerifyEntryPatches(); */
         bool d = KeyDown(VK_CONTROL) && KeyDown(VK_MENU) && KeyDown('U');
         if (d && !prev) {
