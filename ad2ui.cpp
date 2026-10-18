@@ -10,8 +10,10 @@
  *   4. installs MinHook LOG-ONLY hooks on the level-pool pipeline:
  *     GetWorldDataHook @ 0x1402ae190 WorldDataLoader::worldDataForType --
  *             the per-world level-count provider. Logs worldType + ra0
- *             (which call site fired). Returns the original's result via
- *             MinHook's trampoline; no override logic.
+ *             (which call site fired). Defer-and-patch: the trampoline
+ *             fills the out struct, we own only d3 (the count) and
+ *             override it per world (first pass: world 1/mines -> 2);
+ *             untouched worlds run stock.
  *     GetLevelHook @ 0x14026C1C0 getLevelString -- the level-string
  *             composer every level-load path goes through (4 call sites
  *             binary-wide). Logs world/num/mode + the composed path + ra0
@@ -401,10 +403,15 @@ static void InstallFileApiHooks()
 }
 
 /* ------------------------------------------------------------------ */
-/* MinHook: LOG-ONLY hook on WorldDataLoader::worldDataForType        */
-/* (0x1402ae190). GetWorldDataHook calls the trampoline (== the        */
+/* MinHook hook on WorldDataLoader::worldDataForType (0x1402ae190).   */
+/* Defer-and-patch: GetWorldDataHook calls the trampoline (== the      */
 /* original function: stolen prologue re-executes and jmps into the   */
-/* continuation) and returns its result -- zero behavioral change.    */
+/* continuation), which fills out[0..3] = {d0,d1,d2,d3}; we own ONLY  */
+/* d3 (the per-world level count, +0xc) and leave d0/d1/d2 untouched   */
+/* -- they always come from the real code. Untouched worlds (not in   */
+/* the override table) run 100% stock. First pass (approach           */
+/* validation): world 1 (mines) count is set to 2 explicitly; the     */
+/* rest stays stock.                                                   */
 /*                                                                      */
 /* Entry: 5-byte E9 rel32 to a +2^20 relay (jmp GetWorldDataHook).     */
 /* The 14-byte stolen prologue lands in the 64-byte slot's trampoline */
@@ -432,12 +439,19 @@ typedef void* (*FnGetWorldData)(void* out, int worldType);
    needed -- ra0 already names the call site.) */
 static void* GetWorldDataHook(void* out, int worldType)
 {
-    Log("getWorldData: world=%d(%s) out=%p ra0=%08X", worldType, PoolWorldName(worldType), out,
+    if (!s_orig_getWorldData) {
+        Log("getWorldData: FATAL -- no trampoline; out buffer left zeroed");
+        return out;
+    }
+    void* r = ((FnGetWorldData)s_orig_getWorldData)(out, worldType);
+    int* f = (int*)r;                       /* f[0..3] = d0,d1,d2,d3 */
+    const int stock = f[3];
+    if (worldType == 1) f[3] = 2;           /* mines: validation override */
+    Log("getWorldData: world=%d(%s) out=%p cnt=%d (stock %d)%s ra0=%08X",
+        worldType, PoolWorldName(worldType), r, f[3], stock,
+        (worldType == 1 && stock != 2) ? " OVERRIDDEN" : "",
         (uint32_t)((uintptr_t)_ReturnAddress() - (uintptr_t)s_module_base));
-    if (s_orig_getWorldData)
-        return ((FnGetWorldData)s_orig_getWorldData)(out, worldType);
-    Log("getWorldData: FATAL -- no trampoline; out buffer left zeroed");
-    return out;
+    return r;
 }
 
 static bool InstallGetWorldDataHook()
@@ -881,9 +895,9 @@ static DWORD WINAPI Worker(LPVOID)
     /* file-API IAT hooks: runtime path log (match-start diagnostics) */
     InstallFileApiHooks();
 
-    /* log-only hook on worldDataForType. Installed after the IAT hooks
-       (render path stable) and before the ~t+9s preload block that
-       first fires it. */
+    /* hook on worldDataForType (defer-and-patch count). Installed after
+       the IAT hooks (render path stable) and before the ~t+9s preload
+       block that first fires it. */
     InstallGetWorldDataHook();
 
     /* log-only level-string composer hook: identifies which of the 4
