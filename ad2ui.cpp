@@ -1,16 +1,17 @@
 /* ad2ui.cpp -- in-game ImGui overlay for Astro Duel 2 (WREngine / cocos2d-x 3.17.X, SDL3)
  *
- * Current state (two-hook diagnostic build):
+ * Current state (feature/minhook -- MinHook phase-0 diagnostic build):
  *   IAT hooks: the SDL_GL_SwapWindow IAT hook (overlay) and the
  *   kernel32/shell32 file-API IAT log hooks (dir scans, mkdirs, opens).
- *   PLUS two LOG-ONLY inline entry hooks (trampolines, prologue-verified,
- *   zero behavioral change) for the level-pool pipeline:
- *     counthook  @ 0x1402ae190 WorldDataLoader::worldDataForType -- the
- *                 per-world level-count switch (which call site fired,
- *                 worldType, count).
- *     funnelhook @ 0x140030ee0 per-match versus level-load funnel -- the
- *                 caller's world/idx and the live pool int array.
- *   See re/LEVEL_POOL.md + re/CUSTOM_LEVELS.md. All diagnostics ->
+ *   PLUS a MinHook (extern/) LOG-ONLY hook on the level-pool pipeline:
+ *     WdHook @ 0x1402ae190 WorldDataLoader::worldDataForType -- the
+ *             per-world level-count switch (which call site fired,
+ *             worldType). WdHook returns the original's result via
+ *             MinHook's trampoline; no override logic yet (phase 1).
+ *   The hand-rolled counthook/funnelhook trampolines (buggy: rax lost at
+ *   the ret, re/LEVEL_POOL.md #10) are no longer installed and the old
+ *   1-byte mines-count patch was removed in this phase. re/MINHOOK.md
+ *   holds the design + test plan. Diagnostics ->
  *   %LOCALAPPDATA%\AstroDuel2Mod\probe_ui.log.
  *
  *   UNPACK GATE: the DLL can now be loaded via a SUSPENDED start
@@ -59,6 +60,7 @@ extern "C" HDC WINAPI wglGetCurrentDC(void);
 #include "imgui_internal.h"
 #include "backends/imgui_impl_opengl3.h"
 #include "backends/imgui_impl_opengl3_loader.h"
+#include <MinHook.h>   /* vendored: extern/ -- re/MINHOOK.md */
 
 /* ------------------------------------------------------------------ */
 /* logging                                                             */
@@ -731,60 +733,70 @@ static void VerifyEntryPatches()
 }
 
 /* ------------------------------------------------------------------ */
-/* Basic .text patch test: mines count 9 -> 2 (1 byte, no trampoline)  */
-/* FUN_1402ae190 worldDataForType, case worldType==1 (mines):          */
-/*   0x1402ae1c4: B8 09 00 00 00  mov eax, 9   (count -> out[3])       */
-/*   0x1402ae1c5 holds the `9`. Flip to 0x02 (2). The preload loop     */
-/*   (FUN_140013c00) and the picker both iterate i = 1..*(int*)(out+0xC) */
-/*   so both see 2: pool = [1,2]. Tests the match-start pick counter   */
-/*   in 2P vs 3P: does pickIndex advance+wrap across matches, or is it  */
-/*   random? Level = pool[pickIndex] = pickIndex + 1. count=1 froze on  */
-/*   the 2nd match (pickIndex advanced past the 1-element pool ->       */
-/*   "invalid vector subscript" halt); count=2 should survive the      */
-/*   2-player counter and expose the 3-player behavior.                */
+/* MinHook phase 0: LOG-ONLY hook on WorldDataLoader::worldDataForType */
+/* (0x1402ae190). Proves MinHook's trampoline runs the original body   */
+/* and returns cleanly in the live VMP'd game. WdHook calls the        */
+/* trampoline (== the original function: stolen prologue re-executes   */
+/* and jmps into the continuation) and returns its result -- zero      */
+/* behavioral change. No override logic yet (phase 1), no hotkey.      */
+/* re/MINHOOK.md is the design + test plan.                            */
+/*                                                                      */
+/* Entry: 5-byte E9 rel32 to a +2^20 relay (jmp WdHook). The 14-byte   */
+/* stolen prologue lands in the 64-byte slot's trampoline half.        */
+/* Failure mode: if VMP ever re-writes the entry, the hook silently    */
+/* disengages (stock behavior, no crash) -- the verifier logs it.      */
 /* ------------------------------------------------------------------ */
-static uint8_t s_mc_orig = 0;
-static int s_mc_bad = 0;
+static void*        s_orig_wd = nullptr;      /* MinHook trampoline = original function */
+static volatile LONG s_wd_state = 0;          /* 0=off/failed, 1=installed+enabled */
+static int s_wd_revert_logged = 0;
 
-static uint8_t* MinesCountByte()
+typedef void* (*FnWorldData)(void* out, int worldType);
+
+static void* WdHook(void* out, int worldType)
 {
-    return s_module_base ? (uint8_t*)(s_module_base + 0x2ae1c5) : nullptr;
+    /* Phase 0: no call-site classification -- MSVC x64 has no C++-portable
+       way to read the game's return address here (__returnaddress is a C
+       extension; a C-compiled hook TU is the Phase-1 follow-up if site
+       forensics is wanted). The burst pattern is self-evident: the t+9s
+       preload block, the init call, one call per match start (picker). */
+    Log("wd: world=%d(%s) out=%p", worldType, PoolWorldName(worldType), out);
+    if (s_orig_wd)
+        return ((FnWorldData)s_orig_wd)(out, worldType);
+    Log("wd: FATAL -- no trampoline; out buffer left zeroed");
+    return out;
 }
 
-static bool PatchMinesCount()
+static bool InstallWdHook()
 {
-    uint8_t* p = MinesCountByte();
-    if (!p) { Log("minescount: no module base"); return false; }
-    uint8_t* inst = p - 1;                        /* B8 xx 00 00 00 */
-    if (inst[0] == 0xB8 && p[0] == 0x02) {
-        Log("minescount: already patched (0x02) -- nothing to do");
-        s_mc_orig = 0x09;
-        return true;
-    }
-    if (!(inst[0] == 0xB8 && p[0] == 0x09 && p[1] == 0 && p[2] == 0 && p[3] == 0)) {
-        Log("minescount: REFUSED -- bytes at +0x2ae1c4: %02x %02x %02x %02x %02x (want B8 09 00 00 00)",
-            inst[0], p[0], p[1], p[2], p[3]);
+    if (MH_Initialize() != MH_OK) { Log("wd: MH_Initialize FAILED"); return false; }
+    void* target = (void*)(s_module_base + 0x2AE190);
+    if (MH_CreateHook(target, (LPVOID)WdHook, &s_orig_wd) != MH_OK) {
+        Log("wd: MH_CreateHook FAILED -- REFUSED, stock behavior");
         return false;
     }
-    uint8_t* page = (uint8_t*)((uintptr_t)inst & ~0xFFFULL);
-    DWORD old = 0;
-    if (!VirtualProtect(page, 4096, PAGE_READWRITE, &old)) {
-        Log("minescount: VirtualProtect FAILED %lu", GetLastError());
+    /* EnableHookLL freezes all threads once while it writes the entry; do
+       it after the IAT hooks (render path stable) and well before the
+       ~t+9s preload block that first fires worldDataForType. */
+    if (MH_EnableHook(target) != MH_OK) {
+        Log("wd: MH_EnableHook FAILED -- MH_RemoveHook, stock behavior");
+        MH_RemoveHook(target);
         return false;
     }
-    s_mc_orig = p[0];
-    p[0] = 0x02;
-    DWORD dummy = 0;
-    VirtualProtect(page, 4096, old, &dummy);
-    Log("minescount: PATCHED +0x2ae1c5 0x%02x -> 0x02 (mines pool 9 -> 2)", s_mc_orig);
+    s_wd_state = 1;
+    Log("wd: INSTALLED target=%p trampoline=%p", target, s_orig_wd);
     return true;
 }
 
-static void VerifyMinesCount()
+/* ~5s worker-loop check: the entry must still be our E9 rel32. If VMP
+   re-writes it the hook has silently disengaged (stock behavior). Phase 0:
+   log only, no re-arm. */
+static void VerifyWdHookEntry()
 {
-    uint8_t* p = MinesCountByte();
-    if (p && p[0] != 0x02 && s_mc_bad++ < 3)
-        Log("minescount: byte REVERTED to 0x%02x (want 0x02) -- VMP re-wrote .text?", p[0]);
+    if (InterlockedCompareExchange(&s_wd_state, 0, 0) != 1) return;
+    uint8_t* p = (uint8_t*)(s_module_base + 0x2AE190);
+    if (p[0] != 0xE9 && s_wd_revert_logged++ < 3)
+        Log("wd: entry REVERTED (bytes %02x %02x %02x %02x) -- VMP? hook disengaged, stock behavior",
+            p[0], p[1], p[2], p[3]);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1174,15 +1186,18 @@ static DWORD WINAPI Worker(LPVOID)
        23:20:54). Control run: IAT hooks only, no .text patching. */
     /* InstallEntryHooks(); */
 
-    /* basic .text patch test (1-byte immediate, no trampoline): mines 9->12 */
-    PatchMinesCount();
+    /* MinHook phase 0: log-only hook on worldDataForType (re/MINHOOK.md).
+       Installed after the IAT hooks (render path stable) and before the
+       ~t+9s preload block that first fires it. The old 1-byte mines-count
+       patch was removed entirely in this phase. */
+    InstallWdHook();
 
     /* hotkey poll: Ctrl+Alt+U toggles UI */
     bool prev = false;
     int tick = 0;
     for (;;) {
         Sleep(80);
-        if ((++tick % 62) == 0) VerifyMinesCount();
+        if ((++tick % 62) == 0) VerifyWdHookEntry();   /* ~5s: entry still ours? */
         /* if ((++tick % 62) == 0) VerifyEntryPatches(); */
         bool d = KeyDown(VK_CONTROL) && KeyDown(VK_MENU) && KeyDown('U');
         if (d && !prev) {

@@ -17,10 +17,22 @@ add_library(imgui STATIC
     imgui/backends/imgui_impl_opengl3.cpp)
 target_include_directories(imgui PUBLIC imgui imgui/backends)
 
+# MinHook (extern/, vendored from github.com/TsudaKageyu/minhook @ 8af6b4a,
+# BSD-2-Clause): inline function hooking with HDE64-decoded trampolines.
+# Hooks WorldDataLoader::worldDataForType (RVA 0x2ae190) -- see
+# re/MINHOOK.md (astroduel2-modding repo) for the design + test plan.
+# Compiled as C exactly as upstream's CMake does.
+add_library(minhook STATIC
+    extern/src/hook.c
+    extern/src/buffer.c
+    extern/src/trampoline.c
+    extern/src/hde/hde64.c)
+target_include_directories(minhook PUBLIC extern/include)
+
 add_library(ad2ui SHARED
     ad2ui.cpp)   # WIN32_LEAN_AND_MEAN / NOMINMAX are #defined in-source
 target_compile_options(ad2ui PRIVATE /W3 /utf-8)
-target_link_libraries(ad2ui PRIVATE imgui opengl32 user32 gdi32 kernel32)
+target_link_libraries(ad2ui PRIVATE imgui minhook opengl32 user32 gdi32 kernel32)
 
 add_executable(inject
     inject.c)   # WIN32_LEAN_AND_MEAN is #defined in-source
@@ -44,5 +56,5 @@ add_library(steam_api64 SHARED
     ad2ui.cpp
     steam_forwards.cpp)
 target_compile_options(steam_api64 PRIVATE /W3 /utf-8)
-target_link_libraries(steam_api64 PRIVATE imgui opengl32 user32 gdi32 kernel32)
+target_link_libraries(steam_api64 PRIVATE imgui minhook opengl32 user32 gdi32 kernel32)
 
