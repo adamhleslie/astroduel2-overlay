@@ -192,7 +192,7 @@ static int PoolWorldId(const char* name)
 /* active files) runs stock. res/levels/versus/pool.json is reserved  */
 /* for active-flag persistence (a future UI step) -- not read here.   */
 /* ------------------------------------------------------------------ */
-struct PoolFile { std::string name; bool active; int slot; };
+struct PoolFile { std::string name; std::string path; bool active; int slot; };
 struct PoolWorld { int id; std::string dir; std::vector<PoolFile> files; };
 static std::vector<PoolWorld> s_pool_worlds;
 static int s_pool_world_by_id[POOL_WORLD_MAX] = {-1};   /* index into s_pool_worlds, -1 = none */
@@ -218,6 +218,15 @@ static bool PoolTmxBefore(const std::string& a, const std::string& b)
     if ((na < 0) != (nb < 0)) return na >= 0;
     if (na != nb) return na < nb;
     return a < b;
+}
+
+/* compact slots 1..K over the active files (already sort-ordered); returns K */
+static int PoolWorldAssignSlots(PoolWorld& w)
+{
+    int slot = 0;
+    for (PoolFile& pf : w.files)
+        if (pf.active) pf.slot = ++slot;
+    return slot;
 }
 
 /* count of active files in a worldType's cache entry; 0 = no entry (stock) */
@@ -263,20 +272,19 @@ static void PoolWorldScan(const char* dirA, const char* dirName)
     for (const std::string& nm : names) {
         PoolFile pf;
         pf.name = nm;
+        pf.path = std::string(dirA) + "\\" + nm;
         pf.active = (nm.rfind("cg_", 0) != 0);
         if (!pf.active) cg++;
         pf.slot = 0;                                /* assigned below */
         w.files.push_back(pf);
     }
-    int slot = 0, act = 0;
-    for (PoolFile& pf : w.files)
-        if (pf.active) { pf.slot = ++slot; act++; }
+    int act = PoolWorldAssignSlots(w);
     int idx = (int)s_pool_worlds.size();
     s_pool_worlds.push_back(w);
     if (w.id >= 1 && w.id < POOL_WORLD_MAX) s_pool_world_by_id[w.id] = idx;
     Log("poolcache: %s: %d tmx, %d active (cg_ excluded: %d)%s -> count=%d",
         dirName, (int)w.files.size(), act, cg,
-        (w.id < 1) ? " [worldType unknown, not applied]" : "", slot);
+        (w.id < 1) ? " [worldType unknown, not applied]" : "", act);
 }
 
 static void PoolCacheBuild()
@@ -311,6 +319,48 @@ static void PoolCacheBuild()
     } while (FindNextFileW(h, &fd));
     FindClose(h);
     Log("poolcache: %d world dir(s) cached under %s", worlds, dir);
+}
+
+/* ------------------------------------------------------------------ */
+/* pool editor draft + apply (UI)                                      */
+/*                                                                     */
+/* The UI edits a DRAFT copy of the active flags (one vector per world,*/
+/* parallel to s_pool_worlds). Apply copies the selected world's draft*/
+/* into the live cache and recompacts its slots. PoolActiveCount (and */
+/* the future glv remap) read the LIVE cache, so the count only moves */
+/* on Apply. Threading: the draft + live cache are touched by the      */
+/* render thread (UI) only after s_pool_ready; the game thread reads   */
+/* the live cache via PoolActiveCount (minor race, single-player local*/
+/* mod -- the UI is used at menus, not during level loads).            */
+/* ------------------------------------------------------------------ */
+static int    s_pool_sel_world = 0;                    /* index into s_pool_worlds */
+static std::vector<std::vector<char>> s_pool_draft;    /* draft active flags (0/1) */
+static volatile LONG s_pool_ready = 0;                 /* cache + draft built */
+
+/* draft = current live flags; once, after PoolCacheBuild */
+static void PoolDraftInit()
+{
+    s_pool_draft.resize(s_pool_worlds.size());
+    for (size_t i = 0; i < s_pool_worlds.size(); i++) {
+        s_pool_draft[i].resize(s_pool_worlds[i].files.size());
+        for (size_t j = 0; j < s_pool_worlds[i].files.size(); j++)
+            s_pool_draft[i][j] = s_pool_worlds[i].files[j].active ? 1 : 0;
+    }
+    InterlockedExchange(&s_pool_ready, 1);
+}
+
+/* copy the selected world's draft into the live cache + recompact slots */
+static void PoolApplyWorld(int i)
+{
+    if (i < 0 || i >= (int)s_pool_worlds.size()) return;
+    PoolWorld& w = s_pool_worlds[i];
+    int changed = 0;
+    for (size_t j = 0; j < w.files.size() && j < s_pool_draft[i].size(); j++) {
+        bool a = s_pool_draft[i][j] != 0;
+        if (a != w.files[j].active) { w.files[j].active = a; changed++; }
+    }
+    int count = PoolWorldAssignSlots(w);
+    Log("poolui: APPLY %s -- count=%d (%d flag change(s))", w.dir.c_str(), count, changed);
 }
 
 /* file-API IAT hooks: runtime path log (match-start diagnostics)      */
@@ -882,10 +932,44 @@ static void FeedInput()
 
 static void DrawUI()
 {
-    ImGui::SetNextWindowSize(ImVec2(480, 0), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(640, 0), ImGuiCond_FirstUseEver);
     ImGui::Begin("ad2mod overlay", nullptr, ImGuiWindowFlags_NoCollapse);
-    ImGui::Text("ad2mod overlay -- hooks active");
-    ImGui::Text("frame: %d     (Ctrl+Alt+U toggles this overlay)", s_frame);
+    ImGui::Text("ad2mod overlay -- hooks active   (Ctrl+Alt+U toggles)");
+    ImGui::Separator();
+
+    /* ---------------- versus level-pool editor ---------------- */
+    ImGui::Text("VERSUS LEVEL POOL   (local play only)");
+    if (!s_pool_ready || s_pool_worlds.empty()) {
+        ImGui::TextDisabled("no worlds cached (res/levels/versus missing?)");
+    } else {
+        if (s_pool_sel_world < 0 || s_pool_sel_world >= (int)s_pool_worlds.size())
+            s_pool_sel_world = 0;
+        const PoolWorld& sel = s_pool_worlds[s_pool_sel_world];
+        if (ImGui::BeginCombo("##world", sel.dir.c_str())) {
+            for (int i = 0; i < (int)s_pool_worlds.size(); i++) {
+                bool s = ImGui::Selectable(s_pool_worlds[i].dir.c_str(), s_pool_sel_world == i);
+                if (s) s_pool_sel_world = i;
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::Spacing();
+        ImGui::BeginChild("##files", ImVec2(0, 300), true);
+        std::vector<char>& draft = s_pool_draft[s_pool_sel_world];
+        for (size_t j = 0; j < sel.files.size() && j < draft.size(); j++) {
+            bool b = draft[j] != 0;
+            if (ImGui::Checkbox(sel.files[j].name.c_str(), &b))
+                draft[j] = b ? 1 : 0;
+            ImGui::SameLine();
+            ImGui::TextDisabled("%s", sel.files[j].path.c_str());
+            ImGui::SameLine();
+            ImGui::TextDisabled(sel.files[j].active ? "[slot %d]" : "[off]", sel.files[j].slot);
+        }
+        ImGui::EndChild();
+        int act = 0; for (char c : draft) if (c) act++;
+        ImGui::Text("draft count: %d    live count: %d", act, PoolActiveCount(sel.id));
+        if (ImGui::Button(("Apply " + sel.dir).c_str()))
+            PoolApplyWorld(s_pool_sel_world);
+    }
     ImGui::End();
 }
 
@@ -969,6 +1053,7 @@ static DWORD WINAPI Worker(LPVOID)
        no unpacking; built before the hooks install so the summary is in
        the log before the first getWorldData call. */
     PoolCacheBuild();
+    PoolDraftInit();
     {
         /* the game's own command line -- ground truth for whether
            -custom/-dropbox were actually passed to this session */
