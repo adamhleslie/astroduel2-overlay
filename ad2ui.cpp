@@ -12,8 +12,8 @@
  *             the per-world level-count provider. Logs worldType + ra0
  *             (which call site fired). Defer-and-patch: the trampoline
  *             fills the out struct, we own only d3 (the count) and
- *             override it per world (first pass: world 1/mines -> 2);
- *             untouched worlds run stock.
+ *             override it per world with the versus level cache's
+ *             active-file count; worlds not in the cache run stock.
  *     GetLevelHook @ 0x14026C1C0 getLevelString -- the level-string
  *             composer every level-load path goes through (4 call sites
  *             binary-wide). Logs world/num/mode + the composed path + ra0
@@ -57,6 +57,7 @@
 #include <stdlib.h>
 #include <vector>
 #include <string>
+#include <algorithm>   /* std::sort -- natural order of cached .tmx names */
 
 /* single WGL entry we need, declared by hand to avoid <GL/gl.h> clashing
    with imgui_impl_opengl3_loader.h's IMGL3W prototypes */
@@ -68,7 +69,6 @@ extern "C" HDC WINAPI wglGetCurrentDC(void);
 #include "backends/imgui_impl_opengl3_loader.h"
 #include <MinHook.h>
 #include <intrin.h>    /* _ReturnAddress() -- hook caller forensics (x64 C++ intrinsic) */
-#include "cJSON.h"     /* submodule at cjson/ -- pool.json parsing */
 
 /* ------------------------------------------------------------------ */
 /* logging                                                             */
@@ -171,94 +171,146 @@ static int PoolWorldId(const char* name)
 }
 
 /* ------------------------------------------------------------------ */
-/* pool.json -- per-world level-count overrides                        */
+/* versus level cache -- per-world .tmx inventory + the count source  */
 /*                                                                     */
-/* Loaded once at startup from <gamedir>/res/levels/versus/pool.json  */
-/* (the overlay DLL sits in the game dir as steam_api64.dll, so its   */
-/* module path is the base). Object, world name -> int or object:     */
-/*   { "mines": { "auto": true }, "sunken": { "count": 5 } }          */
-/*   { "mines": 2 }                                                   */
-/*   - bare int (or "count")  : explicit count.                       */
-/*   - "auto": true           : count the world's own directory       */
-/*     res/levels/versus/<world>/*.tmx, EXCLUDING the "cg_" prefix    */
-/*     (the Cash Grab variants).                                       */
-/*   - both present           : explicit "count" wins.                 */
-/* 0 / absent = no override (stock). Count range is NOT validated     */
-/* here -- that check lives at another level. Unknown keys and bad    */
-/* values are logged and skipped; no file = all worlds stock.         */
+/* Built once at startup: enumerate every subdirectory of             */
+/* <gamedir>/res/levels/versus (the overlay DLL sits in the game dir  */
+/* as steam_api64.dll, so its module path is the base) and, for each  */
+/* world dir, every *.tmx in it. One cache object per world; each     */
+/* file entry carries:                                                */
+/*   name   -- the file's basename                                    */
+/*   active -- in the live pool; default true EXCEPT the "cg_"       */
+/*             prefix (the Cash Grab variants)                        */
+/*   slot   -- the preload slot the file will be pre-loaded to;       */
+/*             active files take slots 1..K in sort order, inactive   */
+/*             files hold no slot (0)                                 */
+/* Sort is natural: numbered files by ascending trailing number,      */
+/* then non-numbered files alphabetically (cg_mines.tmx etc.).        */
+/* The world's count is K = number of active files; the game          */
+/* preloads slots 1..K contiguously, so this table is also the future*/
+/* glv remap (slot -> file). A world with no cache entry (or no       */
+/* active files) runs stock. res/levels/versus/pool.json is reserved  */
+/* for active-flag persistence (a future UI step) -- not read here.   */
 /* ------------------------------------------------------------------ */
-static int s_pool_counts[POOL_WORLD_MAX] = {0};   /* 0 = stock */
+struct PoolFile { std::string name; bool active; int slot; };
+struct PoolWorld { int id; std::string dir; std::vector<PoolFile> files; };
+static std::vector<PoolWorld> s_pool_worlds;
+static int s_pool_world_by_id[POOL_WORLD_MAX] = {-1};   /* index into s_pool_worlds, -1 = none */
 
-/* count <dir>\\*.tmx (files only, excluding the "cg_" prefix) */
-static int PoolDirCountTmx(const char* dirA)
+/* trailing number of a tmx name ("mines12.tmx" -> 12); -1 when none */
+static int PoolTmxNumber(const std::string& n)
 {
-    wchar_t pat[MAX_PATH + 16];
-    if (!MultiByteToWideChar(CP_ACP, 0, dirA, -1, pat, MAX_PATH + 16)) return 0;
-    wcscat(pat, L"\\*.tmx");
-    WIN32_FIND_DATAW fd;
-    HANDLE h = FindFirstFileW(pat, &fd);
-    if (h == INVALID_HANDLE_VALUE) { Log("pooljson: scan FAILED for %s (err %lu)", dirA, GetLastError()); return 0; }
+    std::string b = n;
+    size_t dot = b.rfind('.');
+    if (dot != std::string::npos) b.erase(dot);
+    size_t i = b.size();
+    while (i > 0 && b[i-1] >= '0' && b[i-1] <= '9') i--;
+    if (i == b.size()) return -1;
+    int num = 0;
+    for (size_t k = i; k < b.size(); k++) num = num * 10 + (b[k] - '0');
+    return num;
+}
+
+/* natural order: numbered by ascending number, non-numbered last */
+static bool PoolTmxBefore(const std::string& a, const std::string& b)
+{
+    int na = PoolTmxNumber(a), nb = PoolTmxNumber(b);
+    if ((na < 0) != (nb < 0)) return na >= 0;
+    if (na != nb) return na < nb;
+    return a < b;
+}
+
+/* count of active files in a worldType's cache entry; 0 = no entry (stock) */
+static int PoolActiveCount(int worldType)
+{
+    if (worldType < 1 || worldType >= POOL_WORLD_MAX) return 0;
+    int idx = s_pool_world_by_id[worldType];
+    if (idx < 0) return 0;
     int n = 0;
-    do {
-        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 &&
-            _wcsnicmp(fd.cFileName, L"cg_", 3) != 0)
-            n++;
-    } while (FindNextFileW(h, &fd));
-    FindClose(h);
+    for (const PoolFile& f : s_pool_worlds[idx].files)
+        if (f.active) n++;
     return n;
 }
 
-static void PoolJsonLoad()
+/* scan one world dir (<base>\\res\\levels\\versus\\<dir>) into the cache */
+static void PoolWorldScan(const char* dirA, const char* dirName)
+{
+    wchar_t pat[MAX_PATH + 16];
+    if (!MultiByteToWideChar(CP_ACP, 0, dirA, -1, pat, MAX_PATH + 16)) return;
+    wcscat(pat, L"\\*.tmx");
+    std::vector<std::string> names;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pat, &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+                char an[260];
+                if (WideCharToMultiByte(CP_ACP, 0, fd.cFileName, -1, an, 260, nullptr, nullptr))
+                    names.push_back(an);
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    } else {
+        Log("poolcache: %s: scan FAILED (err %lu)", dirA, GetLastError());
+        return;
+    }
+    std::sort(names.begin(), names.end(), PoolTmxBefore);
+
+    PoolWorld w;
+    w.id = PoolWorldId(dirName);                    /* 0 = not in the worldType enum */
+    w.dir = dirName;
+    int cg = 0;
+    for (const std::string& nm : names) {
+        PoolFile pf;
+        pf.name = nm;
+        pf.active = (nm.rfind("cg_", 0) != 0);
+        if (!pf.active) cg++;
+        pf.slot = 0;                                /* assigned below */
+        w.files.push_back(pf);
+    }
+    int slot = 0, act = 0;
+    for (PoolFile& pf : w.files)
+        if (pf.active) { pf.slot = ++slot; act++; }
+    int idx = (int)s_pool_worlds.size();
+    s_pool_worlds.push_back(w);
+    if (w.id >= 1 && w.id < POOL_WORLD_MAX) s_pool_world_by_id[w.id] = idx;
+    Log("poolcache: %s: %d tmx, %d active (cg_ excluded: %d)%s -> count=%d",
+        dirName, (int)w.files.size(), act, cg,
+        (w.id < 1) ? " [worldType unknown, not applied]" : "", slot);
+}
+
+static void PoolCacheBuild()
 {
     char base[MAX_PATH] = {0};
-    if (!GetModuleFileNameA(s_dll_instance, base, MAX_PATH)) { Log("pooljson: GetModuleFileName FAILED"); return; }
+    if (!GetModuleFileNameA(s_dll_instance, base, MAX_PATH)) { Log("poolcache: GetModuleFileName FAILED"); return; }
     char* slash = strrchr(base, '\\');
-    if (!slash) { Log("pooljson: no dir in %s", base); return; }
+    if (!slash) { Log("poolcache: no dir in %s", base); return; }
     *slash = 0;
-    char path[MAX_PATH + 64];
-    snprintf(path, sizeof path, "%s\\res\\levels\\versus\\pool.json", base);
+    char dir[MAX_PATH + 32];
+    snprintf(dir, sizeof dir, "%s\\res\\levels\\versus", base);
 
-    FILE* f = fopen(path, "rb");
-    if (!f) { Log("pooljson: %s not found -- all worlds stock", path); return; }
-    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
-    if (n <= 0 || n > (1 << 20)) { Log("pooljson: bad size %ld", n); fclose(f); return; }
-    char* buf = (char*)malloc((size_t)n + 1);
-    if (!buf || fread(buf, 1, (size_t)n, f) != (size_t)n) { Log("pooljson: read failed"); free(buf); fclose(f); return; }
-    buf[n] = 0;
-    fclose(f);
-
-    cJSON* root = cJSON_Parse(buf);
-    free(buf);
-    if (!root || !cJSON_IsObject(root)) { Log("pooljson: parse FAILED -- all worlds stock"); cJSON_Delete(root); return; }
-
-    int applied = 0, refused = 0;
-    cJSON* it = nullptr;
-    cJSON_ArrayForEach(it, root) {
-        int id = PoolWorldId(it->string ? it->string : "");
-        if (!id) { Log("pooljson: unknown world %\"%s\" -- skipped", it->string); refused++; continue; }
-        int v = 0; bool have = false; const char* how = "";
-        if (cJSON_IsNumber(it) && (int)it->valuedouble == it->valueint) {
-            v = it->valueint; have = true; how = "count";
-        } else if (cJSON_IsObject(it)) {
-            cJSON* cnt = cJSON_GetObjectItem(it, "count");
-            cJSON* autoIt = cJSON_GetObjectItem(it, "auto");
-            if (cnt && cJSON_IsNumber(cnt) && (int)cnt->valuedouble == cnt->valueint) {
-                v = cnt->valueint; have = true; how = "count";
-            } else if (autoIt && cJSON_IsBool(autoIt) && cJSON_IsTrue(autoIt)) {
-                char dirA[MAX_PATH + 32];
-                snprintf(dirA, sizeof dirA, "%s\\res\\levels\\versus\\%s", base, PoolWorldName(id));
-                v = PoolDirCountTmx(dirA); have = true; how = "auto";
+    wchar_t pat[MAX_PATH + 32];
+    if (!MultiByteToWideChar(CP_ACP, 0, dir, -1, pat, MAX_PATH + 32)) return;
+    wcscat(pat, L"\\*");
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) { Log("poolcache: %s not found (err %lu) -- all worlds stock", dir, GetLastError()); return; }
+    int worlds = 0;
+    do {
+        if (fd.cFileName[0] == L'.' && (fd.cFileName[1] == L'\0' || (fd.cFileName[1] == L'.' && fd.cFileName[2] == L'\0')))
+            continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            char an[MAX_PATH];
+            if (WideCharToMultiByte(CP_ACP, 0, fd.cFileName, -1, an, MAX_PATH, nullptr, nullptr)) {
+                char wdir[MAX_PATH + 64];
+                snprintf(wdir, sizeof wdir, "%s\\%s", dir, an);
+                PoolWorldScan(wdir, an);
+                worlds++;
             }
         }
-        if (!have) { Log("pooljson: %s: no usable count/auto -- skipped", it->string); refused++; continue; }
-        s_pool_counts[id] = v;
-        applied++;
-        if (strcmp(how, "auto") == 0)
-            Log("pooljson: %s: auto count = %d (scanned *.tmx minus cg_)", it->string, v);
-    }
-    cJSON_Delete(root);
-    Log("pooljson: %s -- %d override(s), %d refused%s", path, applied, refused,
-        applied ? "" : " (all worlds stock)");
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    Log("poolcache: %d world dir(s) cached under %s", worlds, dir);
 }
 
 /* file-API IAT hooks: runtime path log (match-start diagnostics)      */
@@ -508,7 +560,8 @@ static void InstallFileApiHooks()
 /* continuation), which fills out[0..3] = {d0,d1,d2,d3}; we own ONLY  */
 /* d3 (the per-world level count, +0xc) and leave d0/d1/d2 untouched   */
 /* -- they always come from the real code. The count override comes   */
-/* from pool.json (s_pool_counts); untouched worlds run 100% stock.   */
+/* from the versus level cache (active .tmx files per world); worlds  */
+/* not in the cache run 100% stock.                                    */
 /*                                                                      */
 /* Entry: 5-byte E9 rel32 to a +2^20 relay (jmp GetWorldDataHook).     */
 /* The 14-byte stolen prologue lands in the 64-byte slot's trampoline */
@@ -543,7 +596,7 @@ static void* GetWorldDataHook(void* out, int worldType)
     void* r = ((FnGetWorldData)s_orig_getWorldData)(out, worldType);
     int* f = (int*)r;                       /* f[0..3] = d0,d1,d2,d3 */
     const int stock = f[3];
-    const int ov = (worldType >= 1 && worldType < POOL_WORLD_MAX) ? s_pool_counts[worldType] : 0;
+    const int ov = PoolActiveCount(worldType);
     if (ov) f[3] = ov;
     Log("getWorldData: world=%d(%s) out=%p cnt=%d (stock %d)%s ra0=%08X",
         worldType, PoolWorldName(worldType), r, f[3], stock,
@@ -911,10 +964,11 @@ static DWORD WINAPI Worker(LPVOID)
     Log("session: ad2ui build %s %s | pid=%lu | module_base=%p",
         __DATE__, __TIME__, (unsigned long)GetCurrentProcessId(), (void*)s_module_base);
 
-    /* per-world count overrides (res/levels/versus/pool.json). Plain file
-       read -- needs no unpacking; loaded before the hooks install so the
-       summary is in the log before the first getWorldData call. */
-    PoolJsonLoad();
+    /* versus level cache: the per-world .tmx inventory that drives the
+       count override (active files per world). Plain file read -- needs
+       no unpacking; built before the hooks install so the summary is in
+       the log before the first getWorldData call. */
+    PoolCacheBuild();
     {
         /* the game's own command line -- ground truth for whether
            -custom/-dropbox were actually passed to this session */
