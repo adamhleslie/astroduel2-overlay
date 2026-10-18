@@ -31,7 +31,10 @@ target_include_directories(minhook PUBLIC extern/include)
 
 add_library(ad2ui SHARED
     ad2ui.cpp)   # WIN32_LEAN_AND_MEAN / NOMINMAX are #defined in-source
-target_compile_options(ad2ui PRIVATE /W3 /utf-8)
+# /Oy- (disable frame-pointer omission) so _ReturnAddress() in the
+# hooks' ra0 caller forensics (re/MINHOOK.md Phase 0.6) is reliable.
+# Negligible cost for this DLL.
+target_compile_options(ad2ui PRIVATE /W3 /utf-8 /Oy-)
 target_link_libraries(ad2ui PRIVATE imgui minhook opengl32 user32 gdi32 kernel32)
 
 add_executable(inject
@@ -55,6 +58,7 @@ target_link_libraries(ad2launch PRIVATE kernel32)
 add_library(steam_api64 SHARED
     ad2ui.cpp
     steam_forwards.cpp)
-target_compile_options(steam_api64 PRIVATE /W3 /utf-8)
+# /Oy-: same as ad2ui -- ad2ui.cpp uses _ReturnAddress() RA forensics
+target_compile_options(steam_api64 PRIVATE /W3 /utf-8 /Oy-)
 target_link_libraries(steam_api64 PRIVATE imgui minhook opengl32 user32 gdi32 kernel32)
 

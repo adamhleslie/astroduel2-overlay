@@ -8,12 +8,25 @@
  *             per-world level-count switch (which call site fired,
  *             worldType). WdHook returns the original's result via
  *             MinHook's trampoline; no override logic yet (phase 1).
- *     FnlHook @ 0x140030ee0 FUN_140030ee0 -- the per-match versus level
- *             load funnel. Runs the original via MinHook's trampoline,
- *             then logs world/gate/idx + the pool array the body just
- *             consumed (same model as the old log-only funnelhook: this
- *             hook does not write anything). Phase 1 adds the idx
- *             clamp / pool replacement (re/MINHOOK.md).
+ *     FnlHook @ 0x140030ee0 FUN_140030ee0 -- the level-load funnel
+ *             (MGR vtable slot +0x650). Runs the original via MinHook's
+ *             trampoline, then logs world/gate/idx + the pool array the
+ *             body just consumed. Phase 1 adds the idx clamp / pool
+ *             replacement (re/MINHOOK.md). LIVE FINDING 2026-10-18:
+ *             fired ONCE at startup (gate=0) and NOT at versus match
+ *             start -- the match load does not route through it.
+ *     GlvHook @ 0x14026C1C0 getLevelString -- the level-string composer
+ *             every level-load path goes through (4 call sites binary-
+ *             wide). Logs world/num/mode + composed path + ra0 (which
+ *             composer fired, ra0). Phase 0.6: the tool
+ *             that answers the match-start load-path question.
+ *   All hooks log the module-relative return address (ra0) via
+ *   _ReturnAddress() -- /Oy- in CMakeLists keeps the frame pointer so
+ *   it is valid (entry patch is an absolute JMP; the game's CALL
+ *   pushed the real rip before we arrived). Map ra0 -> function with
+ *   re/unpacked_functions.txt: it names the exact call site (e.g.
+ *   which of the 189 polymorphic +0x650 vtable slots invoked the
+ *   funnel).
  *   The hand-rolled counthook/funnelhook trampolines (buggy: rax lost at
  *   the ret, re/LEVEL_POOL.md #10) are no longer installed and the old
  *   1-byte mines-count patch was removed in this phase. re/MINHOOK.md
@@ -67,6 +80,7 @@ extern "C" HDC WINAPI wglGetCurrentDC(void);
 #include "backends/imgui_impl_opengl3.h"
 #include "backends/imgui_impl_opengl3_loader.h"
 #include <MinHook.h>   /* vendored: extern/ -- re/MINHOOK.md */
+#include <intrin.h>    /* _ReturnAddress() -- hook caller forensics (x64 C++ intrinsic) */
 
 /* ------------------------------------------------------------------ */
 /* logging                                                             */
@@ -764,17 +778,25 @@ static int s_wd_revert_logged = 0;
 static void*        s_orig_fnl = nullptr;
 static volatile LONG s_fnl_state = 0;
 static int s_fnl_revert_logged = 0;
+/* glv (phase 0.6) state -- declared here; section below VerifyEntryHooks. */
+static void*         s_orig_glv = nullptr;
+static volatile LONG s_glv_state = 0;
+static int s_glv_revert_logged = 0;
 
 typedef void* (*FnWorldData)(void* out, int worldType);
 
+/* RA forensics: MinHook patches the target entry with an absolute JMP to
+   the detour, so the game's CALL has already pushed the real return
+   address before we arrive -- _ReturnAddress() (frame-pointer based,
+   valid with /Oy- from CMakeLists) == the game caller's rip, i.e. the
+   instruction right after their call. Log module-relative; map to a
+   function with re/unpacked_functions.txt. (Depth-2 walk unavailable:
+   MSVC's C _returnaddress(N) is x86-only; a MASM stub could add it if
+   ever needed -- ra0 already names the call site.) */
 static void* WdHook(void* out, int worldType)
 {
-    /* Phase 0: no call-site classification -- MSVC x64 has no C++-portable
-       way to read the game's return address here (__returnaddress is a C
-       extension; a C-compiled hook TU is the Phase-1 follow-up if site
-       forensics is wanted). The burst pattern is self-evident: the t+9s
-       preload block, the init call, one call per match start (picker). */
-    Log("wd: world=%d(%s) out=%p", worldType, PoolWorldName(worldType), out);
+    Log("wd: world=%d(%s) out=%p ra0=%08X", worldType, PoolWorldName(worldType), out,
+        (uint32_t)((uintptr_t)_ReturnAddress() - (uintptr_t)s_module_base));
     if (s_orig_wd)
         return ((FnWorldData)s_orig_wd)(out, worldType);
     Log("wd: FATAL -- no trampoline; out buffer left zeroed");
@@ -828,8 +850,9 @@ static void FnlHook(void* mgr)
     int idx   = (int)*(volatile int32_t*)(m + 0x380);
     uintptr_t ps = *(volatile uintptr_t*)(m + 0x4A0);
     uintptr_t pe = *(volatile uintptr_t*)(m + 0x4A8);
-    Log("fnl: world=%d(%s) gate=%d idx=%d pool=%p..%p",
-        world, PoolWorldName(world), gate, idx, (void*)ps, (void*)pe);
+    Log("fnl: world=%d(%s) gate=%d idx=%d pool=%p..%p ra0=%08X",
+        world, PoolWorldName(world), gate, idx, (void*)ps, (void*)pe,
+        (uint32_t)((uintptr_t)_ReturnAddress() - (uintptr_t)s_module_base));
     if (ps >= 0x10000 && pe >= ps && (pe - ps) <= 256) {
         int n = (int)((pe - ps) / 4);
         char buf[256]; int out = 0;
@@ -879,6 +902,71 @@ static void VerifyEntryHooks()
             Log("fnl: entry REVERTED (bytes %02x %02x %02x %02x) -- VMP? hook disengaged, stock behavior",
                 p[0], p[1], p[2], p[3]);
     }
+    if (InterlockedCompareExchange(&s_glv_state, 0, 0) == 1) {
+        uint8_t* p = (uint8_t*)(s_module_base + 0x26C1C0);
+        if (p[0] != 0xE9 && s_glv_revert_logged++ < 3)
+            Log("glv: entry REVERTED (bytes %02x %02x %02x %02x) -- VMP? hook disengaged, stock behavior",
+                p[0], p[1], p[2], p[3]);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* MinHook phase 0.6: LOG-ONLY hook on the level-string composer      */
+/* getLevelString (0x14026C1C0: rcx=out std::string, rdx=world,       */
+/* r8=level num, r9=mode). EVERY level-load path composes its path    */
+/* here -- the whole binary has exactly 4 call sites:                 */
+/*   0x140013d9e/0x140013e30   preload, in FUN_140013c00              */
+/*   0x140031456               versus funnel 0x140030ee0 (fnl)        */
+/*   0x14026cda2               alt cluster 0x14026cce0 (world global  */
+/*                             DAT_1405de550, num from obj+0x114),    */
+/*                             called from 0x14026b9c0/0x14026bf20    */
+/* ra0 tells us WHICH composer fired without tracing the 189          */
+/* polymorphic +0x650 vtable call sites. If the funnel's site shows,  */
+/* the fnl hook's own ra0 names the funnel's caller on the same beat. */
+/* ------------------------------------------------------------------ */
+typedef void* (*FnLevelStr)(void* out, int world, int num, char mode);
+
+/* MSVC std::string layout, read-only: byte15 bit0 = heap flag; SSO data
+   at +8 (len=(byte15-1)/2), heap data ptr at +0, len at +16. Clamped. */
+static void PeekStdString(void* s, char* buf, size_t bufsize)
+{
+    if (!s) { snprintf(buf, bufsize, "(nil)"); return; }
+    uint8_t* p = (uint8_t*)s;
+    size_t len; char* data;
+    if (p[15] & 1) { len = *(const uint64_t*)(p + 16); data = *(char* const*)p; }
+    else          { len = (size_t)((p[15] - 1) / 2);     data = (char*)(p + 8); }
+    if (!data || len > 127) { snprintf(buf, bufsize, "(bad ptr=%p len=%zu)", (void*)data, len); return; }
+    size_t n = len < bufsize - 1 ? len : bufsize - 1;
+    memcpy(buf, data, n); buf[n] = 0;
+}
+
+static void* GlvHook(void* out, int world, int num, char mode)
+{
+    void* ret = s_orig_glv ? ((FnLevelStr)s_orig_glv)(out, world, num, mode) : nullptr;
+    if (!s_orig_glv) { Log("glv: FATAL -- no trampoline; composer NOT run"); return ret; }
+    char path[160];
+    PeekStdString(out, path, sizeof(path));
+    Log("glv: world=%d(%s) num=%d mode=%d path=\"%s\" ret=%p ra0=%08X",
+        world, PoolWorldName(world), num, (int)mode, path, ret,
+        (uint32_t)((uintptr_t)_ReturnAddress() - (uintptr_t)s_module_base));
+    return ret;
+}
+
+static bool InstallGlvHook()
+{
+    void* target = (void*)(s_module_base + 0x26C1C0);
+    if (MH_CreateHook(target, (LPVOID)GlvHook, &s_orig_glv) != MH_OK) {
+        Log("glv: MH_CreateHook FAILED -- REFUSED, stock behavior");
+        return false;
+    }
+    if (MH_EnableHook(target) != MH_OK) {
+        Log("glv: MH_EnableHook FAILED -- MH_RemoveHook, stock behavior");
+        MH_RemoveHook(target);
+        return false;
+    }
+    s_glv_state = 1;
+    Log("glv: INSTALLED target=%p trampoline=%p", target, s_orig_glv);
+    return true;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1278,6 +1366,12 @@ static DWORD WINAPI Worker(LPVOID)
       first pass). Same shape as the old log-only funnelhook, MinHook-
       trampolined; the hand-rolled InstallEntryHooks() stays disabled. */
     InstallFnlHook();
+
+    /* MinHook phase 0.6: log-only level-string composer hook (re/
+       MINHOOK.md Phase 0.6). Identifies WHICH of the 4 path composers
+       fired (ra0) and logs the composed path -- answers the versus
+       match-start load-path question in one live test. */
+    InstallGlvHook();
 
     /* hotkey poll: Ctrl+Alt+U toggles UI */
     bool prev = false;
