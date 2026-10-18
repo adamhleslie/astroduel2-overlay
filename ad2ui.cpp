@@ -731,13 +731,13 @@ static void VerifyEntryPatches()
 }
 
 /* ------------------------------------------------------------------ */
-/* Basic .text patch test: mines count 9 -> 12 (1 byte, no trampoline) */
+/* Basic .text patch test: mines count 9 -> 1 (1 byte, no trampoline)  */
 /* FUN_1402ae190 worldDataForType, case worldType==1 (mines):          */
 /*   0x1402ae1c4: B8 09 00 00 00  mov eax, 9   (count -> out[3])       */
-/*   0x1402ae1c5 holds the `9`. Flip to 0x0C (12). The preload loop    */
+/*   0x1402ae1c5 holds the `9`. Flip to 0x01 (1). The preload loop     */
 /*   (FUN_140013c00) and the picker both iterate i = 1..*(int*)(out+0xC) */
-/*   so both see 12 and load mines1..12.tmx (10-12 = copies of         */
-/*   mines2-4, staged on disk). Pure 1-byte immediate edit: no         */
+/*   so both see 1: preload loads only mines1.tmx, and every match     */
+/*   must draw level 1. Pure 1-byte immediate edit: no                 */
 /*   registers, alignment, branches or calls -- isolates whether .text  */
 /*   tamper itself survives VMP (the 23:20 trampoline crash suspect).  */
 /* ------------------------------------------------------------------ */
@@ -754,8 +754,8 @@ static bool PatchMinesCount()
     uint8_t* p = MinesCountByte();
     if (!p) { Log("minescount: no module base"); return false; }
     uint8_t* inst = p - 1;                        /* B8 xx 00 00 00 */
-    if (inst[0] == 0xB8 && p[0] == 0x0C) {
-        Log("minescount: already patched (0x0c) -- nothing to do");
+    if (inst[0] == 0xB8 && p[0] == 0x01) {
+        Log("minescount: already patched (0x01) -- nothing to do");
         s_mc_orig = 0x09;
         return true;
     }
@@ -771,18 +771,18 @@ static bool PatchMinesCount()
         return false;
     }
     s_mc_orig = p[0];
-    p[0] = 0x0C;
+    p[0] = 0x01;
     DWORD dummy = 0;
     VirtualProtect(page, 4096, old, &dummy);
-    Log("minescount: PATCHED +0x2ae1c5 0x%02x -> 0x0c (mines pool 9 -> 12)", s_mc_orig);
+    Log("minescount: PATCHED +0x2ae1c5 0x%02x -> 0x01 (mines pool 9 -> 1)", s_mc_orig);
     return true;
 }
 
 static void VerifyMinesCount()
 {
     uint8_t* p = MinesCountByte();
-    if (p && p[0] != 0x0C && s_mc_bad++ < 3)
-        Log("minescount: byte REVERTED to 0x%02x (want 0x0c) -- VMP re-wrote .text?", p[0]);
+    if (p && p[0] != 0x01 && s_mc_bad++ < 3)
+        Log("minescount: byte REVERTED to 0x%02x (want 0x01) -- VMP re-wrote .text?", p[0]);
 }
 
 /* ------------------------------------------------------------------ */
