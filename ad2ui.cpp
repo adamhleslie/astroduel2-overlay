@@ -188,8 +188,8 @@ static int PoolWorldId(const char* name)
 /* then non-numbered files alphabetically (cg_mines.tmx etc.).        */
 /* The world's count is K = number of active files; the game          */
 /* preloads slots 1..K contiguously, so this table is also the future*/
-/* glv remap (slot -> file). A world with no cache entry (or no       */
-/* active files) runs stock. res/levels/versus/pool.json is reserved  */
+/* glv remap (slot -> file) is enforced in GetLevelRemap: a world      */
+/* with no cache entry (or no active files) runs stock.               */
 /* for active-flag persistence (a future UI step) -- not read here.   */
 /* ------------------------------------------------------------------ */
 struct PoolFile { std::string name; std::string path; bool active; int slot; };
@@ -327,7 +327,7 @@ static void PoolCacheBuild()
 /* The UI edits a DRAFT copy of the active flags (one vector per world,*/
 /* parallel to s_pool_worlds). Apply copies the selected world's draft*/
 /* into the live cache and recompacts its slots. PoolActiveCount (and */
-/* the future glv remap) read the LIVE cache, so the count only moves */
+/* and the glv remap) read the LIVE cache, so the count only moves    */
 /* on Apply. Threading: the draft + live cache are touched by the      */
 /* render thread (UI) only after s_pool_ready; the game thread reads   */
 /* the live cache via PoolActiveCount (minor race, single-player local*/
@@ -732,12 +732,64 @@ static void PeekStdString(void* s, char* buf, size_t bufsize)
     memcpy(buf, data, n); buf[n] = 0;
 }
 
+/* glv remap (stage 2): the composer built levels/versus/<world>/<world><num>.tmx
+   with num = pool slot (1..K, via the WdHook count). Rewrite the composed
+   string to the slot's actual .tmx per the live cache.
+   Guards, in order (each = silent no-op unless noted):
+     pick == 3            cash grab -- composer ignores num (cg_<world>.tmx);
+                          the 4th param is 0 in BOTH branches (proven in the
+                          caller FUN_140013c00: it sets DAT_1405b9ff0 but passes
+                          0); pick is the real discriminator
+     world out of range   void/default/unknown are not pooled
+     no slot == num       outside the active pool (count grew) -> ERROR log
+     name == <w><num>.tmx identity -- the file IS its slot; no rewrite
+   Rewrites via assign() on the game's 32-byte std::string (layout proven from
+   its own copy-ctor FUN_140008700 / dtor FUN_140003000; shared UCRT heap,
+   so assign() may realloc safely). */
+static void GetLevelRemap(void* out, int world, int num, int pick)
+{
+    if (!s_pool_ready || !out) return;
+    if (pick == 3) return;                            /* cash grab */
+    if (world < 1 || world >= POOL_WORLD_MAX) return; /* not pooled */
+    int idx = s_pool_world_by_id[world];
+    if (idx < 0) return;
+    const PoolWorld& w = s_pool_worlds[idx];
+    const PoolFile* pf = nullptr;
+    for (size_t j = 0; j < w.files.size(); j++)
+        if (w.files[j].slot == num) { pf = &w.files[j]; break; }
+    if (!pf) {
+        Log("getLevel REMAP MISS: world=%d(%s) num=%d -- no slot (outside active pool)",
+            world, PoolWorldName(world), num);
+        return;
+    }
+    char ident[48];
+    snprintf(ident, sizeof ident, "%s%d.tmx", PoolWorldName(world), num);
+    if (strcmp(pf->name.c_str(), ident) == 0) return; /* identity: file IS slot num */
+    char np[192];
+    snprintf(np, sizeof np, "levels/versus/%s/%s", w.dir.c_str(), pf->name.c_str());
+    reinterpret_cast<std::string*>(out)->assign(np, strlen(np));
+    Log("getLevel REMAP: world=%d(%s) slot=%d %s -> %s",
+        world, PoolWorldName(world), num, ident, pf->name.c_str());
+}
+
 static void* GetLevelHook(void* out, int world, int num, char mode)
 {
     void* ret = s_orig_getLevel ? ((FnGetLevel)s_orig_getLevel)(out, world, num, mode) : nullptr;
     if (!s_orig_getLevel) { Log("getLevel: FATAL -- no trampoline; composer NOT run"); return ret; }
+    /* probe: pick context FUN_14026B9C0 refreshes before the chain. */
+    uintptr_t b = s_module_base;
+    int pick = (int)*(volatile int32_t*)(b + 0x5B9FF0);      /* DAT_1405b9ff0 */
+    int cnt  = (int)*(volatile int32_t*)(b + 0x5DE56C);      /* DAT_1405de56c (d3) */
+    int spec = -1;
+    if (*(volatile int8_t*)(b + 0x5DE607))                   /* DAT_1405de607 */
+        spec = (int)*(volatile int32_t*)(b + 0x5DE480);      /* DAT_1405de480 */
+    else {
+        uintptr_t s = *(volatile uintptr_t*)(b + 0x5DE9C8);  /* singleton */
+        if (s >= 0x10000) spec = (int)*(volatile int32_t*)(s + 0x45C);
+    }
+    GetLevelRemap(out, world, num, pick);   /* slot -> file (stage 2); logs on rewrite/miss */
     char path[160];
-    PeekStdString(out, path, sizeof(path));
+    PeekStdString(out, path, sizeof(path));   /* post-rewrite: the final path */
     /* DIAG: raw 32-byte dump of the composer's out object (std::string
        layout forensics) -- hex + ASCII. Log only, no behavior change. */
     if (out) {
@@ -749,17 +801,6 @@ static void* GetLevelHook(void* out, int world, int num, char mode)
         }
         hex[64] = 0; asc[32] = 0;
         Log("getLevel RAW: out=%p [00] %s |%s|", out, hex, asc);
-    }
-    /* probe: pick context FUN_14026B9C0 refreshes before the chain. */
-    uintptr_t b = s_module_base;
-    int pick = (int)*(volatile int32_t*)(b + 0x5B9FF0);      /* DAT_1405b9ff0 */
-    int cnt  = (int)*(volatile int32_t*)(b + 0x5DE56C);      /* DAT_1405de56c (d3) */
-    int spec = -1;
-    if (*(volatile int8_t*)(b + 0x5DE607))                   /* DAT_1405de607 */
-        spec = (int)*(volatile int32_t*)(b + 0x5DE480);      /* DAT_1405de480 */
-    else {
-        uintptr_t s = *(volatile uintptr_t*)(b + 0x5DE9C8);  /* singleton */
-        if (s >= 0x10000) spec = (int)*(volatile int32_t*)(s + 0x45C);
     }
     Log("getLevel: world=%d(%s) num=%d mode=%d pick=%d spec=%d cnt=%d path=\"%s\" ret=%p ra0=%08X",
         world, PoolWorldName(world), num, (int)mode, pick, spec, cnt, path, ret,
@@ -1158,9 +1199,10 @@ static DWORD WINAPI Worker(LPVOID)
        block that first fires it. */
     InstallGetWorldDataHook();
 
-    /* log-only level-string composer hook: identifies which of the 4
-       call sites fired (ra0), logs the composed path and the pick
-       context (pick/spec/cnt). */
+    /* level-string composer hook: identifies which call site fired
+       (ra0), applies the slot -> file remap (stage 2), logs the final
+       path and the pick context (pick/spec/cnt). Installed after
+       PoolCacheBuild/PoolDraftInit so the cache is ready on first fire. */
     InstallGetLevelHook();
 
     /* hotkey poll: Ctrl+Alt+U toggles UI */
