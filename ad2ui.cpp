@@ -734,6 +734,18 @@ static void* GetLevelHook(void* out, int world, int num, char mode)
     if (!s_orig_getLevel) { Log("getLevel: FATAL -- no trampoline; composer NOT run"); return ret; }
     char path[160];
     PeekStdString(out, path, sizeof(path));
+    /* DIAG: raw 32-byte dump of the composer's out object (std::string
+       layout forensics) -- hex + ASCII. Log only, no behavior change. */
+    if (out) {
+        const uint8_t* p = (const uint8_t*)out;
+        char hex[65], asc[33];
+        for (int i = 0; i < 32; i++) {
+            sprintf(hex + i * 2, "%02x", p[i]);
+            asc[i] = (p[i] >= 0x20 && p[i] < 0x7f) ? (char)p[i] : '.';
+        }
+        hex[64] = 0; asc[32] = 0;
+        Log("getLevel RAW: out=%p [00] %s |%s|", out, hex, asc);
+    }
     /* probe: pick context FUN_14026B9C0 refreshes before the chain. */
     uintptr_t b = s_module_base;
     int pick = (int)*(volatile int32_t*)(b + 0x5B9FF0);      /* DAT_1405b9ff0 */
