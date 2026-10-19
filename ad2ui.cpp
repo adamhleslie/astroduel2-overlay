@@ -1114,17 +1114,19 @@ static void DrawUI()
         int act = 0; for (char c : draft) if (c) act++;
         int liveRaw = PoolActiveCount(sel.id);
         int live = PoolWorldEffectiveCount(sel.id);
-        char hint[64] = "";
-        if (liveRaw == 1) snprintf(hint, sizeof hint, "  (1 map -> faked to 2)");
+        char hint[80] = "";
+        if (liveRaw == 0) snprintf(hint, sizeof hint, "  (0 maps -- crash expected, below walk minimum)");
+        else if (liveRaw == 1) snprintf(hint, sizeof hint, "  (1 map -> faked to 2)");
         else if (liveRaw > POOL_CAP) snprintf(hint, sizeof hint, "  (only the first %d slots can be selected)", POOL_CAP);
         ImGui::Text("draft count: %d    live count: %d%s", act, live, hint);
-        bool applyBlocked = (act < 1);
-        if (applyBlocked)
-            ImGui::TextDisabled("Apply disabled: select at least 1 map (got %d)", act);
-        ImGui::BeginDisabled(applyBlocked);
         if (ImGui::Button(("Apply " + sel.dir).c_str()))
             PoolApplyWorld(s_pool_sel_world);
-        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Select All"))
+            for (char& c : draft) c = 1;
+        ImGui::SameLine();
+        if (ImGui::Button("Clear Selection"))
+            for (char& c : draft) c = 0;
 
         /* random-map selection (PH/TA loads only; deathmatch / cash grab /
            deathmatch preview are excluded in GetLevelRemap) */
