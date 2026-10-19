@@ -714,17 +714,21 @@ static void VerifyEntryHooks()
 /* ------------------------------------------------------------------ */
 typedef void* (*FnGetLevel)(void* out, int world, int num, char mode);
 
-/* MSVC std::string layout, read-only: byte15 bit0 = heap flag; SSO data
-   at +8 (len=(byte15-1)/2), heap data ptr at +0, len at +16. Clamped. */
+/* Game's 32-byte std::string layout (proven from the copy-ctor FUN_140008700
+   and dtor FUN_140003000, not guessed):
+     bytes  0-7  word0: heap data ptr (heap mode) or SSO chars[0..7]
+     bytes  8-15 word1: SSO chars[8..15] (stale/garbage in heap mode)
+     bytes 16-23 word2: length
+     bytes 24-31 word3: capacity -- >15 => heap, ==15 => SSO (dtor frees word0 iff word3>15)
+   Read-only, clamped. */
 static void PeekStdString(void* s, char* buf, size_t bufsize)
 {
     if (!s) { snprintf(buf, bufsize, "(nil)"); return; }
-    uint8_t* p = (uint8_t*)s;
-    size_t len; char* data;
-    if (p[15] & 1) { len = *(const uint64_t*)(p + 16); data = *(char* const*)p; }
-    else          { len = (size_t)((p[15] - 1) / 2);     data = (char*)(p + 8); }
-    if (!data || len > 127) { snprintf(buf, bufsize, "(bad ptr=%p len=%zu)", (void*)data, len); return; }
-    size_t n = len < bufsize - 1 ? len : bufsize - 1;
+    const uint64_t* w = (const uint64_t*)s;
+    uint64_t len = w[2], cap = w[3];
+    char* data = (cap > 15) ? (char*)w[0] : (char*)s;   /* SSO chars in bytes 0-15 */
+    if ((!data && cap > 15) || len > 127) { snprintf(buf, bufsize, "(bad ptr=%p len=%llu cap=%llu)", (void*)w[0], (unsigned long long)len, (unsigned long long)cap); return; }
+    size_t n = len < bufsize - 1 ? (size_t)len : bufsize - 1;
     memcpy(buf, data, n); buf[n] = 0;
 }
 
