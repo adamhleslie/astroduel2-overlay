@@ -155,6 +155,8 @@ static bool KeyDown(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
 
 #define POOL_WORLD_MAX  16      /* world ids 1..15 */
 
+#define POOL_CAP        12      /* max maps per world: the walk's reachable ceiling; UI default + Apply bound */
+
 static const char* PoolWorldName(int id)
 {
     static const char* names[POOL_WORLD_MAX] = {
@@ -179,17 +181,18 @@ static int PoolWorldId(const char* name)
 /* world dir, every *.tmx in it. One cache object per world; each     */
 /* file entry carries:                                                */
 /*   name   -- the file's basename                                    */
-/*   active -- in the live pool; default true EXCEPT the "cg_"       */
-/*             prefix (the Cash Grab variants)                        */
+/*   active -- in the live pool; default = the first POOL_CAP (12)   */
+/*             non-cg files in sort order; "cg_" variants stay off    */
 /*   slot   -- the preload slot the file will be pre-loaded to;       */
 /*             active files take slots 1..K in sort order, inactive   */
 /*             files hold no slot (0)                                 */
 /* Sort is natural: numbered files by ascending trailing number,      */
 /* then non-numbered files alphabetically (cg_mines.tmx etc.).        */
-/* The world's count is K = number of active files; the game          */
-/* preloads slots 1..K contiguously, so this table is also the future*/
-/* glv remap (slot -> file) is enforced in GetLevelRemap: a world      */
-/* with no cache entry (or no active files) runs stock.               */
+/* The world's count is K = number of active files, kept 1..POOL_CAP  */
+/* by the UI (Apply is disabled outside that range); the game         */
+/* preloads slots 1..K contiguously, so this table doubles as the glv */
+/* remap (num -> file), enforced in GetLevelRemap. A world with no    */
+/* cache entry (or no active files) runs stock.                       */
 /* for active-flag persistence (a future UI step) -- not read here.   */
 /* ------------------------------------------------------------------ */
 struct PoolFile { std::string name; std::string path; bool active; int slot; };
@@ -241,6 +244,15 @@ static int PoolActiveCount(int worldType)
     return n;
 }
 
+/* the count the game actually sees: a single-map world is faked to 2,
+   because the walk's exhaust path is an assert (K must be >= 2). Both
+   nums (1 and 2) resolve to the lone active file in GetLevelRemap. */
+static int PoolWorldEffectiveCount(int worldType)
+{
+    int n = PoolActiveCount(worldType);
+    return (n == 1) ? 2 : n;
+}
+
 /* scan one world dir (<base>\\res\\levels\\versus\\<dir>) into the cache */
 static void PoolWorldScan(const char* dirA, const char* dirName)
 {
@@ -268,13 +280,14 @@ static void PoolWorldScan(const char* dirA, const char* dirName)
     PoolWorld w;
     w.id = PoolWorldId(dirName);                    /* 0 = not in the worldType enum */
     w.dir = dirName;
-    int cg = 0;
+    int cg = 0, nonCg = 0;
     for (const std::string& nm : names) {
         PoolFile pf;
         pf.name = nm;
         pf.path = std::string(dirA) + "\\" + nm;
-        pf.active = (nm.rfind("cg_", 0) != 0);
-        if (!pf.active) cg++;
+        bool isCg = (nm.rfind("cg_", 0) == 0);
+        if (isCg) { cg++; pf.active = false; }
+        else      { nonCg++; pf.active = (nonCg <= POOL_CAP); }
         pf.slot = 0;                                /* assigned below */
         w.files.push_back(pf);
     }
@@ -282,8 +295,8 @@ static void PoolWorldScan(const char* dirA, const char* dirName)
     int idx = (int)s_pool_worlds.size();
     s_pool_worlds.push_back(w);
     if (w.id >= 1 && w.id < POOL_WORLD_MAX) s_pool_world_by_id[w.id] = idx;
-    Log("poolcache: %s: %d tmx, %d active (cg_ excluded: %d)%s -> count=%d",
-        dirName, (int)w.files.size(), act, cg,
+    Log("poolcache: %s: %d tmx, %d active (default cap %d, cg_ excluded: %d)%s -> count=%d",
+        dirName, (int)w.files.size(), act, POOL_CAP, cg,
         (w.id < 1) ? " [worldType unknown, not applied]" : "", act);
 }
 
@@ -646,7 +659,7 @@ static void* GetWorldDataHook(void* out, int worldType)
     void* r = ((FnGetWorldData)s_orig_getWorldData)(out, worldType);
     int* f = (int*)r;                       /* f[0..3] = d0,d1,d2,d3 */
     const int stock = f[3];
-    const int ov = PoolActiveCount(worldType);
+    const int ov = PoolWorldEffectiveCount(worldType);
     if (ov) f[3] = ov;
     Log("getWorldData: world=%d(%s) out=%p cnt=%d (stock %d)%s ra0=%08X",
         worldType, PoolWorldName(worldType), r, f[3], stock,
@@ -757,6 +770,13 @@ static void GetLevelRemap(void* out, int world, int num, int pick)
     const PoolFile* pf = nullptr;
     for (size_t j = 0; j < w.files.size(); j++)
         if (w.files[j].slot == num) { pf = &w.files[j]; break; }
+    if (!pf) {
+        /* single-map world: count is faked to 2, so num may be 2 with only
+           slot 1 populated -- resolve any in-range num to the lone file */
+        int act = 0; const PoolFile* only = nullptr;
+        for (const PoolFile& f : w.files) if (f.active) { act++; only = &f; }
+        if (act == 1) pf = only;
+    }
     if (!pf) {
         Log("getLevel REMAP MISS: world=%d(%s) num=%d -- no slot (outside active pool)",
             world, PoolWorldName(world), num);
@@ -1011,9 +1031,17 @@ static void DrawUI()
         }
         ImGui::EndChild();
         int act = 0; for (char c : draft) if (c) act++;
-        ImGui::Text("draft count: %d    live count: %d", act, PoolActiveCount(sel.id));
+        int liveRaw = PoolActiveCount(sel.id);
+        int live = PoolWorldEffectiveCount(sel.id);
+        ImGui::Text("draft count: %d    live count: %d%s", act, live,
+                    (liveRaw == 1) ? "  (1 map -> faked to 2)" : "");
+        bool applyBlocked = (act < 1) || (act > POOL_CAP);
+        if (applyBlocked)
+            ImGui::TextDisabled("Apply disabled: select 1-%d maps (got %d)", POOL_CAP, act);
+        ImGui::BeginDisabled(applyBlocked);
         if (ImGui::Button(("Apply " + sel.dir).c_str()))
             PoolApplyWorld(s_pool_sel_world);
+        ImGui::EndDisabled();
     }
     ImGui::End();
 }
