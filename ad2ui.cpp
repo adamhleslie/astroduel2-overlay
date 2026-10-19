@@ -1114,10 +1114,10 @@ static void DrawUI()
         int act = 0; for (char c : draft) if (c) act++;
         int liveRaw = PoolActiveCount(sel.id);
         int live = PoolWorldEffectiveCount(sel.id);
-        char hint[80] = "";
+        char hint[112] = "";
         if (liveRaw == 0) snprintf(hint, sizeof hint, "  (0 maps -- crash expected, below walk minimum)");
         else if (liveRaw == 1) snprintf(hint, sizeof hint, "  (1 map -> faked to 2)");
-        else if (liveRaw > POOL_CAP) snprintf(hint, sizeof hint, "  (only the first %d slots can be selected)", POOL_CAP);
+        else if (liveRaw > POOL_CAP) snprintf(hint, sizeof hint, "  (only the first %d slots will be used in Pilot Hunters or Team Annihilation)", POOL_CAP);
         ImGui::Text("draft count: %d    live count: %d%s", act, live, hint);
         if (ImGui::Button(("Apply " + sel.dir).c_str()))
             PoolApplyWorld(s_pool_sel_world);
