@@ -781,15 +781,16 @@ static int RandBelow(int n)
 static bool PoolRandPick(int mode, int world, std::string* out)
 {
     if (mode < 1 || mode > 4) return false;
-    std::vector<std::string> c;
+    /* candidate = (world dir, file name) references into the cache; the
+       relative path is built once, only for the picked entry. */
+    std::vector<std::pair<const std::string*, const std::string*>> c;
     auto add = [&](int w, bool active_only)
     {
         int idx = s_pool_world_by_id[w];
         if (idx < 0) return;
         const PoolWorld& pw = s_pool_worlds[idx];
         for (const PoolFile& f : pw.files)
-            if (!active_only || f.active)
-                c.push_back("levels/versus/" + pw.dir + "/" + f.name);
+            if (!active_only || f.active) c.emplace_back(&pw.dir, &f.name);
     };
     switch (mode) {
     case 1:   add(world, true);  break;                       /* WorldActive */
@@ -798,7 +799,8 @@ static bool PoolRandPick(int mode, int world, std::string* out)
     case 4:   for (int w = 1; w < POOL_WORLD_MAX; w++) add(w, false); break;  /* Any       */
     }
     if (c.empty()) return false;
-    out->assign(c[RandBelow((int)c.size())]);
+    const auto& pick = c[RandBelow((int)c.size())];
+    *out = "levels/versus/" + *pick.first + "/" + *pick.second;
     return true;
 }
 
