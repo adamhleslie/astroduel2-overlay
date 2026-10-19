@@ -748,12 +748,11 @@ static void PeekStdString(void* s, char* buf, size_t bufsize)
    so assign() may realloc safely). */
 static void GetLevelRemap(void* out, int world, int num, int pick)
 {
-    if (!s_pool_ready) { Log("getLevel REMAP early-out: !s_pool_ready (world=%d num=%d pick=%d)", world, num, pick); return; }
-    if (!out) { Log("getLevel REMAP early-out: !out (world=%d num=%d pick=%d)", world, num, pick); return; }
-    if (pick == 3) { Log("getLevel REMAP early-out: pick==3 cash grab (world=%d num=%d)", world, num); return; }
-    if (world < 1 || world >= POOL_WORLD_MAX) { Log("getLevel REMAP early-out: world out of range (world=%d num=%d)", world, num); return; }
+    if (!s_pool_ready || !out) return;
+    if (pick == 3) return;                            /* cash grab */
+    if (world < 1 || world >= POOL_WORLD_MAX) return; /* not pooled */
     int idx = s_pool_world_by_id[world];
-    if (idx < 0) { Log("getLevel REMAP early-out: no cache entry (world=%d num=%d)", world, num); return; }
+    if (idx < 0) return;
     const PoolWorld& w = s_pool_worlds[idx];
     const PoolFile* pf = nullptr;
     for (size_t j = 0; j < w.files.size(); j++)
@@ -765,7 +764,7 @@ static void GetLevelRemap(void* out, int world, int num, int pick)
     }
     char ident[48];
     snprintf(ident, sizeof ident, "%s%d.tmx", PoolWorldName(world), num);
-    if (strcmp(pf->name.c_str(), ident) == 0) { Log("getLevel REMAP early-out: identity (world=%d slot=%d %s)", world, num, ident); return; } /* identity: file IS slot num */
+    if (strcmp(pf->name.c_str(), ident) == 0) return; /* identity: file IS slot num */
     char np[192];
     snprintf(np, sizeof np, "levels/versus/%s/%s", w.dir.c_str(), pf->name.c_str());
     reinterpret_cast<std::string*>(out)->assign(np, strlen(np));
@@ -791,18 +790,6 @@ static void* GetLevelHook(void* out, int world, int num, char mode)
     GetLevelRemap(out, world, num, pick);   /* slot -> file (stage 2); logs on rewrite/miss */
     char path[160];
     PeekStdString(out, path, sizeof(path));   /* post-rewrite: the final path */
-    /* DIAG: raw 32-byte dump of the composer's out object (std::string
-       layout forensics) -- hex + ASCII. Log only, no behavior change. */
-    if (out) {
-        const uint8_t* p = (const uint8_t*)out;
-        char hex[65], asc[33];
-        for (int i = 0; i < 32; i++) {
-            sprintf(hex + i * 2, "%02x", p[i]);
-            asc[i] = (p[i] >= 0x20 && p[i] < 0x7f) ? (char)p[i] : '.';
-        }
-        hex[64] = 0; asc[32] = 0;
-        Log("getLevel RAW: out=%p [00] %s |%s|", out, hex, asc);
-    }
     Log("getLevel: world=%d(%s) num=%d mode=%d pick=%d spec=%d cnt=%d path=\"%s\" ret=%p ra0=%08X",
         world, PoolWorldName(world), num, (int)mode, pick, spec, cnt, path, ret,
         (uint32_t)((uintptr_t)_ReturnAddress() - (uintptr_t)s_module_base));
