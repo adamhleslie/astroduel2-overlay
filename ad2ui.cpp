@@ -139,7 +139,7 @@ static bool  s_imgui_ready = false;
 static HWND  s_hwnd = nullptr;
 static int   s_frame = 0;
 static bool  s_gl_info_logged = false;
-static bool  s_show_ui = true;           /* Ctrl+Alt+U toggles */
+static bool  s_show_ui = false;          /* Ctrl+Alt+U toggles (off by default) */
 
 /* input edge-state */
 static bool  s_mouse_btn[5] = {false,false,false,false,false};
@@ -1071,11 +1071,10 @@ static void DrawUI()
 {
     ImGui::SetNextWindowSize(ImVec2(640, 0), ImGuiCond_FirstUseEver);
     ImGui::Begin("ad2mod overlay", nullptr, ImGuiWindowFlags_NoCollapse);
-    ImGui::Text("ad2mod overlay -- hooks active   (Ctrl+Alt+U toggles)");
     ImGui::Separator();
 
     /* ---------------- versus level-pool editor ---------------- */
-    ImGui::Text("VERSUS LEVEL POOL   (local play only)");
+    ImGui::Text("VERSUS LEVEL POOL");
     if (!s_pool_ready || s_pool_worlds.empty()) {
         ImGui::TextDisabled("no worlds cached (res/levels/versus missing?)");
     } else {
