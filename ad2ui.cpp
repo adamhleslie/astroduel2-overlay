@@ -355,6 +355,12 @@ static void PoolCacheBuild()
 static int    s_pool_sel_world = 0;                    /* index into s_pool_worlds */
 static std::vector<std::vector<char>> s_pool_draft;    /* draft active flags (0/1) */
 static volatile LONG s_pool_ready = 0;                 /* cache + draft built */
+/* Random-map selection (render thread writes on combo change; game thread
+ * reads in PoolRandPick -- same minor-race pattern as the active flags).
+ * 0=Off, 1=WorldActive, 2=World, 3=AnyActive, 4=Any. Only ever reaches
+ * PH/TA walk loads: deathmatch (pick=2), cash grab (pick=3) and the
+ * deathmatch UI preview (mode=1) are all excluded in GetLevelRemap. */
+static volatile int s_rand_mode = 0;
 
 /* draft = current live flags; once, after PoolCacheBuild */
 static void PoolDraftInit()
@@ -751,6 +757,34 @@ static void PeekStdString(void* s, char* buf, size_t bufsize)
     memcpy(buf, data, n); buf[n] = 0;
 }
 
+/* Random-map candidate pick for one PH/TA load. Returns false (caller runs
+ * the normal slot/identity logic) for Off mode or an empty candidate pool;
+ * otherwise fills *out with a uniformly random candidate filename. Only the
+ * game thread ever calls this (single consumer; CRT rand is thread-safe). */
+static bool PoolRandPick(int mode, int world, std::string* out)
+{
+    static volatile LONG s_seeded = 0;
+    if (mode < 1 || mode > 4) return false;
+    if (!s_seeded) { srand(GetTickCount()); s_seeded = 1; }
+    std::vector<const char*> c;
+    auto add = [&](int w, bool active_only)
+    {
+        int idx = s_pool_world_by_id[w];
+        if (idx < 0) return;
+        for (const PoolFile& f : s_pool_worlds[idx].files)
+            if (!active_only || f.active) c.push_back(f.name.c_str());
+    };
+    switch (mode) {
+    case 1:   add(world, true);  break;                       /* WorldActive */
+    case 2:   add(world, false); break;                       /* World       */
+    case 3:   for (int w = 1; w < POOL_WORLD_MAX; w++) add(w, true);  break;  /* AnyActive */
+    case 4:   for (int w = 1; w < POOL_WORLD_MAX; w++) add(w, false); break;  /* Any       */
+    }
+    if (c.empty()) return false;
+    out->assign(c[rand() % (int)c.size()]);
+    return true;
+}
+
 /* glv remap (stage 2): the composer built levels/versus/<world>/<world><num>.tmx
    with num = pool slot (1..K, via the WdHook count). Rewrite the composed
    string to the slot's actual .tmx per the live cache.
@@ -759,20 +793,51 @@ static void PeekStdString(void* s, char* buf, size_t bufsize)
                           the 4th param is 0 in BOTH branches (proven in the
                           caller FUN_140013c00: it sets DAT_1405b9ff0 but passes
                           0); pick is the real discriminator
+     pick == 2            deathmatch -- player-specified level (num == spec);
+                          randomization must never touch it
+     mode == 1            deathmatch UI map-preview (a 2nd composer branch;
+                          the real load after it runs mode=0) -- forensics
+                          only, keep it out of the remap log too
      world out of range   void/default/unknown are not pooled
      no slot == num       outside the active pool (count grew) -> ERROR log
      name == <w><num>.tmx identity -- the file IS its slot; no rewrite
+   Random-map mode (s_rand_mode != 0, PH/TA loads only) redirects the load to
+   a uniformly random candidate BEFORE the slot lookup; a pick equal to the
+   identity file falls through to the normal logic.
    Rewrites via assign() on the game's 32-byte std::string (layout proven from
    its own copy-ctor FUN_140008700 / dtor FUN_140003000; shared UCRT heap,
    so assign() may realloc safely). */
-static void GetLevelRemap(void* out, int world, int num, int pick)
+static void GetLevelRemap(void* out, int world, int num, int pick, int mode)
 {
     if (!s_pool_ready || !out) return;
     if (pick == 3) return;                            /* cash grab */
+    if (pick == 2) return;                            /* deathmatch: specified level */
+    if (mode == 1) return;                            /* deathmatch UI preview */
     if (world < 1 || world >= POOL_WORLD_MAX) return; /* not pooled */
     int idx = s_pool_world_by_id[world];
     if (idx < 0) return;
     const PoolWorld& w = s_pool_worlds[idx];
+
+    /* random map selection (PH/TA walks only -- the guards above exclude
+       deathmatch, cash grab and the deathmatch UI preview). Off mode or an
+       empty candidate pool: fall through to the normal slot/identity logic. */
+    {
+        std::string rfile;
+        if (PoolRandPick(s_rand_mode, world, &rfile)) {
+            char ident[48];
+            snprintf(ident, sizeof ident, "%s%d.tmx", PoolWorldName(world), num);
+            if (rfile != ident) {
+                char np[192];
+                snprintf(np, sizeof np, "levels/versus/%s/%s", w.dir.c_str(), rfile.c_str());
+                reinterpret_cast<std::string*>(out)->assign(np, strlen(np));
+                Log("getLevel RAND: mode=%d world=%d(%s) num=%d -> %s",
+                    s_rand_mode, world, PoolWorldName(world), num, rfile.c_str());
+                return;
+            }
+            /* picked the identity file: nothing to redirect. */
+        }
+    }
+
     const PoolFile* pf = nullptr;
     for (size_t j = 0; j < w.files.size(); j++)
         if (w.files[j].slot == num) { pf = &w.files[j]; break; }
@@ -813,7 +878,7 @@ static void* GetLevelHook(void* out, int world, int num, char mode)
         uintptr_t s = *(volatile uintptr_t*)(b + 0x5DE9C8);  /* singleton */
         if (s >= 0x10000) spec = (int)*(volatile int32_t*)(s + 0x45C);
     }
-    GetLevelRemap(out, world, num, pick);   /* slot -> file (stage 2); logs on rewrite/miss */
+    GetLevelRemap(out, world, num, pick, (int)mode);   /* slot -> file (stage 2); logs on rewrite/miss */
     char path[160];
     PeekStdString(out, path, sizeof(path));   /* post-rewrite: the final path */
     Log("getLevel: world=%d(%s) num=%d mode=%d pick=%d spec=%d cnt=%d path=\"%s\" ret=%p ra0=%08X",
@@ -1048,6 +1113,15 @@ static void DrawUI()
         if (ImGui::Button(("Apply " + sel.dir).c_str()))
             PoolApplyWorld(s_pool_sel_world);
         ImGui::EndDisabled();
+
+        /* random-map selection (PH/TA loads only; deathmatch / cash grab /
+           deathmatch preview are excluded in GetLevelRemap) */
+        static const char* kRandModes[] = { "Off", "WorldActive", "World", "AnyActive", "Any" };
+        static int s_rand_sel = 0;
+        if (ImGui::Combo("Random map (PH/TA only)", &s_rand_sel, kRandModes, 5))
+            s_rand_mode = s_rand_sel;
+        if (s_rand_mode == 1 && live == 0)
+            ImGui::TextDisabled("WorldActive pool empty (0 maps) -- random falls through");
     }
     ImGui::End();
 }
