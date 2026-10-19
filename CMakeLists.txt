@@ -41,7 +41,7 @@ add_library(ad2ui SHARED
 # hooks' ra0 caller forensics (_ReturnAddress, below) is reliable.
 # Negligible cost for this DLL.
 target_compile_options(ad2ui PRIVATE /W3 /utf-8 /Oy-)
-target_link_libraries(ad2ui PRIVATE imgui minhook cjson opengl32 user32 gdi32 kernel32)
+target_link_libraries(ad2ui PRIVATE imgui minhook cjson opengl32 user32 gdi32 shell32 kernel32)
 
 # steam_api64 proxy: same overlay code, but built as the game's own
 # steam_api64.dll and loaded at import resolution (before any game code
@@ -56,5 +56,5 @@ add_library(steam_api64 SHARED
     steam_forwards.cpp)
 # /Oy-: same as ad2ui -- ad2ui.cpp uses _ReturnAddress() RA forensics
 target_compile_options(steam_api64 PRIVATE /W3 /utf-8 /Oy-)
-target_link_libraries(steam_api64 PRIVATE imgui minhook cjson opengl32 user32 gdi32 kernel32)
+target_link_libraries(steam_api64 PRIVATE imgui minhook cjson opengl32 user32 gdi32 shell32 kernel32)
 

@@ -62,6 +62,7 @@
 /* single WGL entry we need, declared by hand to avoid <GL/gl.h> clashing
    with imgui_impl_opengl3_loader.h's IMGL3W prototypes */
 extern "C" HDC WINAPI wglGetCurrentDC(void);
+extern "C" HINSTANCE WINAPI ShellExecuteA(HWND, const char*, const char*, const char*, const char*, int);
 
 #include "imgui.h"
 #include "imgui_internal.h"
@@ -198,6 +199,7 @@ static int PoolWorldId(const char* name)
 /* cache entry (or no active files) runs stock.                       */
 /* for active-flag persistence (a future UI step) -- not read here.   */
 /* ------------------------------------------------------------------ */
+static char s_res_dir[MAX_PATH] = {0};   /* <gamedir>\res -- explorer button target (set in PoolCacheBuild) */
 struct PoolFile { std::string name; std::string path; bool active; int slot; };
 struct PoolWorld { int id; std::string dir; std::vector<PoolFile> files; };
 static std::vector<PoolWorld> s_pool_worlds;
@@ -288,7 +290,7 @@ static void PoolWorldScan(const char* dirA, const char* dirName)
         if (nm.rfind("cg_", 0) == 0) { cg++; continue; } /* cash grab: not pooled at all */
         PoolFile pf;
         pf.name = nm;
-        pf.path = std::string(dirA) + "\\" + nm;
+        pf.path = std::string("levels/versus/") + dirName + "/" + nm;   /* res-relative */
         nonCg++;
         pf.active = true;                              /* default: everything on */
         pf.slot = 0;                                   /* assigned below */
@@ -316,6 +318,7 @@ static void PoolCacheBuild()
     *slash = 0;
     char dir[MAX_PATH + 32];
     snprintf(dir, sizeof dir, "%s\\res\\levels\\versus", base);
+    snprintf(s_res_dir, sizeof s_res_dir, "%s\\res", base);
 
     wchar_t pat[MAX_PATH + 32];
     if (!MultiByteToWideChar(CP_ACP, 0, dir, -1, pat, MAX_PATH + 32)) return;
@@ -387,6 +390,18 @@ static void PoolApplyWorld(int i)
     }
     int count = PoolWorldAssignSlots(w);
     Log("poolui: APPLY %s -- count=%d (%d flag change(s))", w.dir.c_str(), count, changed);
+}
+
+/* set every world's draft to a value (1=select all, 0=clear all) and apply
+ * all worlds into the live cache in one shot. */
+static void PoolApplyAll(int value)
+{
+    for (size_t i = 0; i < s_pool_worlds.size() && i < s_pool_draft.size(); i++) {
+        for (char& c : s_pool_draft[i]) c = (char)value;
+        PoolApplyWorld((int)i);   /* copies draft -> live + recompacts slots */
+    }
+    Log("poolui: %s all worlds -- count=%d applied to every world",
+        value ? "RESET" : "CLEAR", value);
 }
 
 /* file-API IAT hooks: runtime path log (match-start diagnostics)      */
@@ -1098,6 +1113,18 @@ static void DrawUI()
             }
             ImGui::EndCombo();
         }
+        ImGui::Spacing();
+        /* global actions (all worlds) */
+        if (ImGui::Button("Open res folder")) {
+            ShellExecuteA(NULL, "open", s_res_dir, NULL, NULL, SW_SHOWNORMAL);
+            Log("poolui: opened res folder %s", s_res_dir);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Reset All Worlds"))
+            PoolApplyAll(1);
+        ImGui::SameLine();
+        if (ImGui::Button("Clear All Worlds"))
+            PoolApplyAll(0);
         ImGui::Spacing();
         ImGui::BeginChild("##files", ImVec2(0, 300), true);
         std::vector<char>& draft = s_pool_draft[s_pool_sel_world];
