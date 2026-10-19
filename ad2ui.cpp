@@ -758,22 +758,38 @@ static void PeekStdString(void* s, char* buf, size_t bufsize)
     memcpy(buf, data, n); buf[n] = 0;
 }
 
+/* Private PRNG (splitmix64) -- must NOT use srand/rand: the game imports
+ * the CRT rand (IAT-verified) and its own randomization rides that single
+ * shared generator; reseeding or consuming from it would perturb the
+ * game's sequences. Only the game thread ever calls this. */
+static uint64_t s_rng_state = 0;
+static int RandBelow(int n)
+{
+    if (!s_rng_state)
+        s_rng_state = (uint64_t)GetTickCount() ^ (uint64_t)(uintptr_t)&s_rng_state;
+    uint64_t z = (s_rng_state += 0x9E3779B97F4A7C15ULL);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
+    return (int)((z ^ (z >> 31)) % (uint64_t)n);
+}
+
 /* Random-map candidate pick for one PH/TA load. Returns false (caller runs
  * the normal slot/identity logic) for Off mode or an empty candidate pool;
- * otherwise fills *out with a uniformly random candidate filename. Only the
- * game thread ever calls this (single consumer; CRT rand is thread-safe). */
+ * otherwise fills *out with a uniformly random candidate's full relative
+ * path ("levels/versus/<world>/<file>") -- the world in the path may differ
+ * from the one being loaded (Any/AnyActive). */
 static bool PoolRandPick(int mode, int world, std::string* out)
 {
-    static volatile LONG s_seeded = 0;
     if (mode < 1 || mode > 4) return false;
-    if (!s_seeded) { srand(GetTickCount()); s_seeded = 1; }
-    std::vector<const char*> c;
+    std::vector<std::string> c;
     auto add = [&](int w, bool active_only)
     {
         int idx = s_pool_world_by_id[w];
         if (idx < 0) return;
-        for (const PoolFile& f : s_pool_worlds[idx].files)
-            if (!active_only || f.active) c.push_back(f.name.c_str());
+        const PoolWorld& pw = s_pool_worlds[idx];
+        for (const PoolFile& f : pw.files)
+            if (!active_only || f.active)
+                c.push_back("levels/versus/" + pw.dir + "/" + f.name);
     };
     switch (mode) {
     case 1:   add(world, true);  break;                       /* WorldActive */
@@ -782,7 +798,7 @@ static bool PoolRandPick(int mode, int world, std::string* out)
     case 4:   for (int w = 1; w < POOL_WORLD_MAX; w++) add(w, false); break;  /* Any       */
     }
     if (c.empty()) return false;
-    out->assign(c[rand() % (int)c.size()]);
+    out->assign(c[RandBelow((int)c.size())]);
     return true;
 }
 
@@ -794,17 +810,17 @@ static bool PoolRandPick(int mode, int world, std::string* out)
                           the 4th param is 0 in BOTH branches (proven in the
                           caller FUN_140013c00: it sets DAT_1405b9ff0 but passes
                           0); pick is the real discriminator
-     pick == 2            deathmatch -- player-specified level (num == spec);
-                          randomization must never touch it
-     mode == 1            deathmatch UI map-preview (a 2nd composer branch;
-                          the real load after it runs mode=0) -- forensics
-                          only, keep it out of the remap log too
      world out of range   void/default/unknown are not pooled
      no slot == num       outside the active pool (count grew) -> ERROR log
      name == <w><num>.tmx identity -- the file IS its slot; no rewrite
-   Random-map mode (s_rand_mode != 0, PH/TA loads only) redirects the load to
-   a uniformly random candidate BEFORE the slot lookup; a pick equal to the
-   identity file falls through to the normal logic.
+   Random-map mode (s_rand_mode != 0) redirects the load to a uniformly
+   random candidate's full path BEFORE the slot lookup -- PH/TA loads only:
+   deathmatch (pick == 2, player-specified) and the deathmatch UI preview
+   (mode == 1) keep the normal slot remap below; the 1/N identity pick is
+   negligible and rewrites anyway.
+   Deathmatch loads DO get the normal slot remap: the picker is bounded by
+   the WdHook count, so num is in [1..K] and the table must stay total over
+   it (a player-specified level lands on a valid active map).
    Rewrites via assign() on the game's 32-byte std::string (layout proven from
    its own copy-ctor FUN_140008700 / dtor FUN_140003000; shared UCRT heap,
    so assign() may realloc safely). */
@@ -812,30 +828,22 @@ static void GetLevelRemap(void* out, int world, int num, int pick, int mode)
 {
     if (!s_pool_ready || !out) return;
     if (pick == 3) return;                            /* cash grab */
-    if (pick == 2) return;                            /* deathmatch: specified level */
-    if (mode == 1) return;                            /* deathmatch UI preview */
     if (world < 1 || world >= POOL_WORLD_MAX) return; /* not pooled */
     int idx = s_pool_world_by_id[world];
     if (idx < 0) return;
     const PoolWorld& w = s_pool_worlds[idx];
 
-    /* random map selection (PH/TA walks only -- the guards above exclude
-       deathmatch, cash grab and the deathmatch UI preview). Off mode or an
-       empty candidate pool: fall through to the normal slot/identity logic. */
+    /* random map selection -- PH/TA loads only (deathmatch and its UI
+       preview take the normal slot remap below). Off mode or an empty
+       candidate pool: fall through. */
+    if (pick != 2 && mode != 1)
     {
-        std::string rfile;
-        if (PoolRandPick(s_rand_mode, world, &rfile)) {
-            char ident[48];
-            snprintf(ident, sizeof ident, "%s%d.tmx", PoolWorldName(world), num);
-            if (rfile != ident) {
-                char np[192];
-                snprintf(np, sizeof np, "levels/versus/%s/%s", w.dir.c_str(), rfile.c_str());
-                reinterpret_cast<std::string*>(out)->assign(np, strlen(np));
-                Log("getLevel RAND: mode=%d world=%d(%s) num=%d -> %s",
-                    s_rand_mode, world, PoolWorldName(world), num, rfile.c_str());
-                return;
-            }
-            /* picked the identity file: nothing to redirect. */
+        std::string rpath;
+        if (PoolRandPick(s_rand_mode, world, &rpath)) {
+            reinterpret_cast<std::string*>(out)->assign(rpath);
+            Log("getLevel RAND: mode=%d world=%d(%s) num=%d -> %s",
+                s_rand_mode, world, PoolWorldName(world), num, rpath.c_str());
+            return;
         }
     }
 
