@@ -297,6 +297,10 @@ static void PoolWorldScan(const char* dirA, const char* dirName)
     int idx = (int)s_pool_worlds.size();
     s_pool_worlds.push_back(w);
     if (w.id >= 1 && w.id < POOL_WORLD_MAX) s_pool_world_by_id[w.id] = idx;
+    if (nonCg < 2)
+        Log("poolcache ERROR: %s: only %d level(s) found (< 2) -- a pool of %d is below the walk's safe minimum (its exhaust path is an assert); %s",
+            dirName, nonCg, act,
+            act == 1 ? "count faked to 2 to survive (single-map mode)" : "CRASH/FREEZE expected in this world");
     Log("poolcache: %s: %d tmx, %d active (default cap %d, cg_ skipped: %d)%s -> count=%d",
         dirName, (int)w.files.size(), act, POOL_CAP, cg,
         (w.id < 1) ? " [worldType unknown, not applied]" : "", act);
