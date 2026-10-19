@@ -748,11 +748,12 @@ static void PeekStdString(void* s, char* buf, size_t bufsize)
    so assign() may realloc safely). */
 static void GetLevelRemap(void* out, int world, int num, int pick)
 {
-    if (!s_pool_ready || !out) return;
-    if (pick == 3) return;                            /* cash grab */
-    if (world < 1 || world >= POOL_WORLD_MAX) return; /* not pooled */
+    if (!s_pool_ready) { Log("getLevel REMAP early-out: !s_pool_ready (world=%d num=%d pick=%d)", world, num, pick); return; }
+    if (!out) { Log("getLevel REMAP early-out: !out (world=%d num=%d pick=%d)", world, num, pick); return; }
+    if (pick == 3) { Log("getLevel REMAP early-out: pick==3 cash grab (world=%d num=%d)", world, num); return; }
+    if (world < 1 || world >= POOL_WORLD_MAX) { Log("getLevel REMAP early-out: world out of range (world=%d num=%d)", world, num); return; }
     int idx = s_pool_world_by_id[world];
-    if (idx < 0) return;
+    if (idx < 0) { Log("getLevel REMAP early-out: no cache entry (world=%d num=%d)", world, num); return; }
     const PoolWorld& w = s_pool_worlds[idx];
     const PoolFile* pf = nullptr;
     for (size_t j = 0; j < w.files.size(); j++)
@@ -764,7 +765,7 @@ static void GetLevelRemap(void* out, int world, int num, int pick)
     }
     char ident[48];
     snprintf(ident, sizeof ident, "%s%d.tmx", PoolWorldName(world), num);
-    if (strcmp(pf->name.c_str(), ident) == 0) return; /* identity: file IS slot num */
+    if (strcmp(pf->name.c_str(), ident) == 0) { Log("getLevel REMAP early-out: identity (world=%d slot=%d %s)", world, num, ident); return; } /* identity: file IS slot num */
     char np[192];
     snprintf(np, sizeof np, "levels/versus/%s/%s", w.dir.c_str(), pf->name.c_str());
     reinterpret_cast<std::string*>(out)->assign(np, strlen(np));
