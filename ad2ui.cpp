@@ -225,7 +225,7 @@ static int PoolWorldAssignSlots(PoolWorld& w)
 {
     int slot = 0;
     for (PoolFile& pf : w.files)
-        if (pf.active) pf.slot = ++slot;
+        pf.slot = pf.active ? ++slot : 0;   /* inactive must lose any stale slot */
     return slot;
 }
 
