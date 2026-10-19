@@ -182,12 +182,14 @@ static int PoolWorldId(const char* name)
 /* file entry carries:                                                */
 /*   name   -- the file's basename                                    */
 /*   active -- in the live pool; default = the first POOL_CAP (12)   */
-/*             non-cg files in sort order; "cg_" variants stay off    */
+/*             files in sort order; "cg_" (Cash Grab) files are      */
+/*             skipped entirely at scan time and never enter the pool*/
 /*   slot   -- the preload slot the file will be pre-loaded to;       */
 /*             active files take slots 1..K in sort order, inactive   */
 /*             files hold no slot (0)                                 */
 /* Sort is natural: numbered files by ascending trailing number,      */
-/* then non-numbered files alphabetically (cg_mines.tmx etc.).        */
+/* then non-numbered files alphabetically (cg_* files never reach    */
+/* the sort -- they are dropped at scan time).                        */
 /* The world's count is K = number of active files, kept 1..POOL_CAP  */
 /* by the UI (Apply is disabled outside that range); the game         */
 /* preloads slots 1..K contiguously, so this table doubles as the glv */
@@ -282,20 +284,20 @@ static void PoolWorldScan(const char* dirA, const char* dirName)
     w.dir = dirName;
     int cg = 0, nonCg = 0;
     for (const std::string& nm : names) {
+        if (nm.rfind("cg_", 0) == 0) { cg++; continue; } /* cash grab: not pooled at all */
         PoolFile pf;
         pf.name = nm;
         pf.path = std::string(dirA) + "\\" + nm;
-        bool isCg = (nm.rfind("cg_", 0) == 0);
-        if (isCg) { cg++; pf.active = false; }
-        else      { nonCg++; pf.active = (nonCg <= POOL_CAP); }
-        pf.slot = 0;                                /* assigned below */
+        nonCg++;
+        pf.active = (nonCg <= POOL_CAP);               /* default: first POOL_CAP, rest off */
+        pf.slot = 0;                                   /* assigned below */
         w.files.push_back(pf);
     }
     int act = PoolWorldAssignSlots(w);
     int idx = (int)s_pool_worlds.size();
     s_pool_worlds.push_back(w);
     if (w.id >= 1 && w.id < POOL_WORLD_MAX) s_pool_world_by_id[w.id] = idx;
-    Log("poolcache: %s: %d tmx, %d active (default cap %d, cg_ excluded: %d)%s -> count=%d",
+    Log("poolcache: %s: %d tmx, %d active (default cap %d, cg_ skipped: %d)%s -> count=%d",
         dirName, (int)w.files.size(), act, POOL_CAP, cg,
         (w.id < 1) ? " [worldType unknown, not applied]" : "", act);
 }
