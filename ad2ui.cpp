@@ -155,7 +155,7 @@ static bool KeyDown(int vk) { return (GetAsyncKeyState(vk) & 0x8000) != 0; }
 
 #define POOL_WORLD_MAX  16      /* world ids 1..15 */
 
-#define POOL_CAP        12      /* max maps per world: the walk's reachable ceiling; UI default + Apply bound */
+#define POOL_CAP        12      /* reachable ceiling: the walk pool only ever emits 1..12 */
 
 static const char* PoolWorldName(int id)
 {
@@ -181,17 +181,18 @@ static int PoolWorldId(const char* name)
 /* world dir, every *.tmx in it. One cache object per world; each     */
 /* file entry carries:                                                */
 /*   name   -- the file's basename                                    */
-/*   active -- in the live pool; default = the first POOL_CAP (12)   */
-/*             files in sort order; "cg_" (Cash Grab) files are      */
-/*             skipped entirely at scan time and never enter the pool*/
+/*   active -- in the live pool; default = every scanned file on;    */
+/*             "cg_" (Cash Grab) files are skipped entirely at scan  */
+/*             time and never enter the pool                         */
 /*   slot   -- the preload slot the file will be pre-loaded to;       */
 /*             active files take slots 1..K in sort order, inactive   */
 /*             files hold no slot (0)                                 */
 /* Sort is natural: numbered files by ascending trailing number,      */
 /* then non-numbered files alphabetically (cg_* files never reach    */
 /* the sort -- they are dropped at scan time).                        */
-/* The world's count is K = number of active files, kept 1..POOL_CAP  */
-/* by the UI (Apply is disabled outside that range); the game         */
+/* The world's count is K = number of active files (Apply is blocked  */
+/* only at 0); slots above POOL_CAP are harmless but unreachable --   */
+/* the walk's pool tops out at 12. The game                          */
 /* preloads slots 1..K contiguously, so this table doubles as the glv */
 /* remap (num -> file), enforced in GetLevelRemap. A world with no    */
 /* cache entry (or no active files) runs stock.                       */
@@ -289,7 +290,7 @@ static void PoolWorldScan(const char* dirA, const char* dirName)
         pf.name = nm;
         pf.path = std::string(dirA) + "\\" + nm;
         nonCg++;
-        pf.active = (nonCg <= POOL_CAP);               /* default: first POOL_CAP, rest off */
+        pf.active = true;                              /* default: everything on */
         pf.slot = 0;                                   /* assigned below */
         w.files.push_back(pf);
     }
@@ -301,8 +302,8 @@ static void PoolWorldScan(const char* dirA, const char* dirName)
         Log("poolcache ERROR: %s: only %d level(s) found (< 2) -- a pool of %d is below the walk's safe minimum (its exhaust path is an assert); %s",
             dirName, nonCg, act,
             act == 1 ? "count faked to 2 to survive (single-map mode)" : "CRASH/FREEZE expected in this world");
-    Log("poolcache: %s: %d tmx, %d active (default cap %d, cg_ skipped: %d)%s -> count=%d",
-        dirName, (int)w.files.size(), act, POOL_CAP, cg,
+    Log("poolcache: %s: %d tmx, %d active (all on by default, cg_ skipped: %d)%s -> count=%d",
+        dirName, (int)w.files.size(), act, cg,
         (w.id < 1) ? " [worldType unknown, not applied]" : "", act);
 }
 
@@ -1104,11 +1105,13 @@ static void DrawUI()
         int act = 0; for (char c : draft) if (c) act++;
         int liveRaw = PoolActiveCount(sel.id);
         int live = PoolWorldEffectiveCount(sel.id);
-        ImGui::Text("draft count: %d    live count: %d%s", act, live,
-                    (liveRaw == 1) ? "  (1 map -> faked to 2)" : "");
-        bool applyBlocked = (act < 1) || (act > POOL_CAP);
+        char hint[64] = "";
+        if (liveRaw == 1) snprintf(hint, sizeof hint, "  (1 map -> faked to 2)");
+        else if (liveRaw > POOL_CAP) snprintf(hint, sizeof hint, "  (only the first %d slots can be selected)", POOL_CAP);
+        ImGui::Text("draft count: %d    live count: %d%s", act, live, hint);
+        bool applyBlocked = (act < 1);
         if (applyBlocked)
-            ImGui::TextDisabled("Apply disabled: select 1-%d maps (got %d)", POOL_CAP, act);
+            ImGui::TextDisabled("Apply disabled: select at least 1 map (got %d)", act);
         ImGui::BeginDisabled(applyBlocked);
         if (ImGui::Button(("Apply " + sel.dir).c_str()))
             PoolApplyWorld(s_pool_sel_world);
