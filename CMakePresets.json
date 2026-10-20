@@ -1,5 +1,5 @@
 {
-  "version": 6,
+  "version": 2,
   "configurePresets": [
     {
       "name": "windows",
@@ -9,11 +9,16 @@
       "binaryDir": "${sourceDir}/build",
       "cacheVariables": {
         "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreadedDLL"
+      },
+      "vendor": {
+        "jetbrains.com/clion": {
+          "toolchain": "Visual Studio"
+        }
       }
     }
   ],
   "buildPresets": [
-    { "name": "Release", "configurePreset": "windows", "configuration": "Release" },
-    { "name": "Debug",   "configurePreset": "windows", "configuration": "Debug" }
+    { "name": "Debug",   "configurePreset": "windows", "configuration": "Debug" },
+    { "name": "Release", "configurePreset": "windows", "configuration": "Release" }
   ]
 }
