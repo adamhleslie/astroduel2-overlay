@@ -5,5 +5,5 @@
 // standalone ad2ui.dll must not link it.
 //
 // Regenerate steam_forwards.inc after a game update:
-//   ad2modkit/tools/gen_steam_proxy.py
+//   tools/generate_steam_proxy.py
 #include "steam_forwards.inc"

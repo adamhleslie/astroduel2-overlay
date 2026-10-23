@@ -50,7 +50,7 @@ target_link_libraries(ad2ui PRIVATE imgui minhook cjson opengl32 user32 gdi32 sh
 # ordinals preserved. Pragmas instead of a .def: MSVC's .def forwarder
 # check (a known linker bug) would otherwise require the target DLL at
 # link time. Regenerate after game updates:
-#   ad2modkit/tools/gen_steam_proxy.py
+#   tools/generate_steam_proxy.py
 add_library(steam_api64 SHARED
     ad2ui.cpp
     steam_forwards.cpp)
