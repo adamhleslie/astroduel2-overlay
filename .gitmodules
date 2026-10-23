@@ -1,9 +1,9 @@
 [submodule "imgui"]
+	path = external/imgui
 	url = https://github.com/ocornut/imgui.git
-	path = imgui
 [submodule "minhook"]
-	path = minhook
+	path = external/minhook
 	url = https://github.com/TsudaKageyu/minhook.git
 [submodule "cjson"]
-	path = cjson
+	path = external/cjson
 	url = https://github.com/DaveGamble/cJSON.git
