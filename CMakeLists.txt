@@ -31,8 +31,9 @@ endif ()
 
 # Overlay + steam_api64 proxy
 add_library(steam_api64 SHARED
-    src/ad2ui.cpp
-    src/steam_forwards.cpp)
+    src/ad2mod.cpp
+    src/steam_forwards.cpp
+    src/hooks_file.cpp)
 
 # TODO: Investigate refactoring to use RtlCaptureStackBackTrace
 # /Oy- (disable frame-pointer omission) for _ReturnAddress() reliability

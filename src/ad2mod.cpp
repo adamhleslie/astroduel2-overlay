@@ -1,7 +1,5 @@
-/* ad2ui.cpp -- in-game ImGui overlay for Astro Duel 2 (WREngine / cocos2d-x 3.17.X, SDL3)
- *
- * Built as both ad2ui.dll and the steam_api64.dll proxy (see CMakeLists);
- * in either case DllMain spawns one worker thread that:
+/* ad2mod.cpp -- in-game ImGui overlay for Astro Duel 2 injected as proxy steam dll
+ * DllMain spawns one worker thread that:
  *   1. waits for VMP to unpack the image in place (UNPACK GATE below),
  *   2. IAT-hooks SDL_GL_SwapWindow to render an ImGui overlay on the
  *      game's own GL context (render strategy below),
@@ -48,28 +46,28 @@
  *     W/X/Y for its own level picker.
  *   - UI toggle: Ctrl+Alt+U (polled in worker thread, edge-triggered).
  */
-#define WIN32_LEAN_AND_MEAN
-#define NOMINMAX
-#include <windows.h>
-#include <stdio.h>
+#include "ad2mod.h"
+
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
 #include <vector>
 #include <string>
 #include <algorithm>   /* std::sort -- natural order of cached .tmx names */
-
-/* single WGL entry we need, declared by hand to avoid <GL/gl.h> clashing
-   with imgui_impl_opengl3_loader.h's IMGL3W prototypes */
-extern "C" HDC WINAPI wglGetCurrentDC(void);
-extern "C" HINSTANCE WINAPI ShellExecuteA(HWND, const char*, const char*, const char*, const char*, int);
+#include <shellapi.h>
 
 #include "imgui.h"
 #include "imgui_internal.h"
 #include "backends/imgui_impl_opengl3.h"
 #include "backends/imgui_impl_opengl3_loader.h"
+#include "anchors.h"
 #include <MinHook.h>
 #include <intrin.h>    /* _ReturnAddress() -- hook caller forensics (x64 C++ intrinsic) */
+#include <winnt.h> // TODO: Investigate refactoring to use RtlCaptureStackBackTrace
+
+#include "hooks_file.h"
+
+uintptr_t ad2mod::s_module_base = 0;
 
 /* ------------------------------------------------------------------ */
 /* logging                                                             */
@@ -82,7 +80,7 @@ static FILE* s_log = nullptr;
 static CRITICAL_SECTION s_log_cs;
 static volatile LONG s_log_cs_init = 0;
 
-static void Log(const char* fmt, ...)
+void ad2mod::Log(const char* fmt, ...)
 {
     if (InterlockedCompareExchange(&s_log_cs_init, 1, 0) == 0)
         InitializeCriticalSection(&s_log_cs);
@@ -117,7 +115,6 @@ static void Log(const char* fmt, ...)
 /* ------------------------------------------------------------------ */
 /* globals                                                             */
 /* ------------------------------------------------------------------ */
-static uintptr_t s_module_base = 0;      /* main module (AstroDuel2.exe) */
 static HINSTANCE s_dll_instance = nullptr; /* our module -- game dir base for pool.json */
 static int (*s_orig_swap)(void*) = nullptr; /* original SDL_GL_SwapWindow */
 /* SDL3 dropped per-platform SDL_GetWindowHWND; the HWND is a window
@@ -277,7 +274,7 @@ static void PoolWorldScan(const char* dirA, const char* dirName)
         } while (FindNextFileW(h, &fd));
         FindClose(h);
     } else {
-        Log("poolcache: %s: scan FAILED (err %lu)", dirA, GetLastError());
+        ad2mod::Log("poolcache: %s: scan FAILED (err %lu)", dirA, GetLastError());
         return;
     }
     std::sort(names.begin(), names.end(), PoolTmxBefore);
@@ -301,10 +298,10 @@ static void PoolWorldScan(const char* dirA, const char* dirName)
     s_pool_worlds.push_back(w);
     if (w.id >= 1 && w.id < POOL_WORLD_MAX) s_pool_world_by_id[w.id] = idx;
     if (nonCg < 2)
-        Log("poolcache ERROR: %s: only %d level(s) found (< 2) -- a pool of %d is below the walk's safe minimum (its exhaust path is an assert); %s",
+        ad2mod::Log("poolcache ERROR: %s: only %d level(s) found (< 2) -- a pool of %d is below the walk's safe minimum (its exhaust path is an assert); %s",
             dirName, nonCg, act,
             act == 1 ? "count faked to 2 to survive (single-map mode)" : "CRASH/FREEZE expected in this world");
-    Log("poolcache: %s: %d tmx, %d active (all on by default, cg_ skipped: %d)%s -> count=%d",
+    ad2mod::Log("poolcache: %s: %d tmx, %d active (all on by default, cg_ skipped: %d)%s -> count=%d",
         dirName, (int)w.files.size(), act, cg,
         (w.id < 1) ? " [worldType unknown, not applied]" : "", act);
 }
@@ -312,9 +309,9 @@ static void PoolWorldScan(const char* dirA, const char* dirName)
 static void PoolCacheBuild()
 {
     char base[MAX_PATH] = {0};
-    if (!GetModuleFileNameA(s_dll_instance, base, MAX_PATH)) { Log("poolcache: GetModuleFileName FAILED"); return; }
+    if (!GetModuleFileNameA(s_dll_instance, base, MAX_PATH)) { ad2mod::Log("poolcache: GetModuleFileName FAILED"); return; }
     char* slash = strrchr(base, '\\');
-    if (!slash) { Log("poolcache: no dir in %s", base); return; }
+    if (!slash) { ad2mod::Log("poolcache: no dir in %s", base); return; }
     *slash = 0;
     char dir[MAX_PATH + 32];
     snprintf(dir, sizeof dir, "%s\\res\\levels\\versus", base);
@@ -325,7 +322,7 @@ static void PoolCacheBuild()
     wcscat(pat, L"\\*");
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW(pat, &fd);
-    if (h == INVALID_HANDLE_VALUE) { Log("poolcache: %s not found (err %lu) -- all worlds stock", dir, GetLastError()); return; }
+    if (h == INVALID_HANDLE_VALUE) { ad2mod::Log("poolcache: %s not found (err %lu) -- all worlds stock", dir, GetLastError()); return; }
     int worlds = 0;
     do {
         if (fd.cFileName[0] == L'.' && (fd.cFileName[1] == L'\0' || (fd.cFileName[1] == L'.' && fd.cFileName[2] == L'\0')))
@@ -341,7 +338,7 @@ static void PoolCacheBuild()
         }
     } while (FindNextFileW(h, &fd));
     FindClose(h);
-    Log("poolcache: %d world dir(s) cached under %s", worlds, dir);
+    ad2mod::Log("poolcache: %d world dir(s) cached under %s", worlds, dir);
 }
 
 /* ------------------------------------------------------------------ */
@@ -389,7 +386,7 @@ static void PoolApplyWorld(int i)
         if (a != w.files[j].active) { w.files[j].active = a; changed++; }
     }
     int count = PoolWorldAssignSlots(w);
-    Log("poolui: APPLY %s -- count=%d (%d flag change(s))", w.dir.c_str(), count, changed);
+    ad2mod::Log("poolui: APPLY %s -- count=%d (%d flag change(s))", w.dir.c_str(), count, changed);
 }
 
 /* set every world's draft to a value (1=select all, 0=clear all) and apply
@@ -400,248 +397,8 @@ static void PoolApplyAll(int value)
         for (char& c : s_pool_draft[i]) c = (char)value;
         PoolApplyWorld((int)i);   /* copies draft -> live + recompacts slots */
     }
-    Log("poolui: %s all worlds -- count=%d applied to every world",
+    ad2mod::Log("poolui: %s all worlds -- count=%d applied to every world",
         value ? "RESET" : "CLEAR", value);
-}
-
-/* file-API IAT hooks: runtime path log (match-start diagnostics)      */
-/*                                                                     */
-/* IAT-hooks the game's own file imports (kernel32/shell32, not VMP   */
-/* code) and logs every dir scan, mkdir, and open on "interesting"    */
-/* paths (levels/*.tmx, *_data.xml, res/...). Ground truth for WHICH   */
-/* level files a match actually loads.                                  */
-/* ------------------------------------------------------------------ */
-static volatile LONG s_hook_active = 0;
-typedef HANDLE (WINAPI *FnFindFirstFileW)(const wchar_t*, WIN32_FIND_DATAW*);
-typedef BOOL   (WINAPI *FnCreateDirectoryW)(const wchar_t*, void*);
-typedef HANDLE (WINAPI *FnCreateFileW)(const wchar_t*, DWORD, DWORD, void*, DWORD, DWORD, void*);
-typedef BOOL   (WINAPI *FnCreateFile2)(const wchar_t*, void*, DWORD, DWORD, void*);
-typedef DWORD  (WINAPI *FnGetFileAttributesW)(const wchar_t*);
-typedef HRESULT (WINAPI *FnSHGKF)(const GUID*, DWORD, HANDLE, PWSTR*);
-static FnFindFirstFileW s_fff_orig = nullptr;
-static FnCreateDirectoryW s_cdw_orig = nullptr;
-static FnCreateFileW s_cfw_orig = nullptr;
-static FnCreateFile2 s_cf2_orig = nullptr;
-static FnGetFileAttributesW s_gfa_orig = nullptr;
-static FnSHGKF s_shgkf_orig = nullptr;
-
-/* case-insensitive substring test (hooks run at game call rates; keep it
-   cheap -- a handful of short needles, early-out) */
-static bool IContains(const wchar_t* hay, const wchar_t* needle)
-{
-    for (const wchar_t* h = hay; *h; ++h) {
-        const wchar_t* a = h, *b = needle;
-        while (*a && *b) {
-            wchar_t la = (*a >= L'A' && *a <= L'Z') ? (wchar_t)(*a + 32) : *a;
-            wchar_t lb = (*b >= L'A' && *b <= L'Z') ? (wchar_t)(*b + 32) : *b;
-            if (la != lb) break;
-            ++a; ++b;
-        }
-        if (*b == 0) return true;
-    }
-    return false;
-}
-
-/* Only interesting paths reach the log for the high-volume file APIs:
-   custom-levels names, the candidate base dirs, and anything level-ish. */
-static bool PathInteresting(const wchar_t* p)
-{
-    if (!p) return false;
-    static const wchar_t* const kFilters[] = {
-        L"tmx", L"_data.xml", L"bounty", L"ironcactus", L"dropbox",
-        L"\\games\\", L"astro duel",
-    };
-    for (size_t i = 0; i < sizeof(kFilters) / sizeof(kFilters[0]); i++)
-        if (IContains(p, kFilters[i])) return true;
-    return false;
-}
-
-static HANDLE WINAPI Ad2FindFirstFileW(const wchar_t* pattern, WIN32_FIND_DATAW* fd)
-{
-    if (pattern && s_hook_active) Log("GAME FindFirstFileW: %ls", pattern);
-    return s_fff_orig(pattern, fd);
-}
-static BOOL WINAPI Ad2CreateDirectoryW(const wchar_t* path, void* sa)
-{
-    BOOL r = s_cdw_orig(path, sa);
-    if (path && s_hook_active) Log("GAME CreateDirectoryW: %ls  (ret=%d, err=%lu)", path, r, GetLastError());
-    return r;
-}
-
-/* CreateFileW: catches level-file opens AND failures (the "lists but won't
-   load" case). Filtered to interesting paths so res-loading noise stays out. */
-static HANDLE WINAPI Ad2CreateFileW(const wchar_t* path, DWORD acc, DWORD share,
-                                    void* sa, DWORD disp, DWORD flags, void* tmpl)
-{
-    HANDLE h = s_cfw_orig(path, acc, share, sa, disp, flags, tmpl);
-    if (s_hook_active && PathInteresting(path))
-        Log("GAME CreateFileW: %ls  (ret=%p%s)", path, (void*)h,
-            h == INVALID_HANDLE_VALUE ? " FAILED" : "");
-    return h;
-}
-
-static BOOL WINAPI Ad2CreateFile2(const wchar_t* path, void* ph, DWORD acc,
-                                  DWORD opts, void* info)
-{
-    BOOL r = s_cf2_orig(path, ph, acc, opts, info);
-    if (s_hook_active && PathInteresting(path))
-        Log("GAME CreateFile2: %ls  (ret=%d%s)", path, r, r ? "" : " FAILED");
-    return r;
-}
-
-/* GetFileAttributesW: the dir-exists pre-checks probe through this --
-   a NOT-FOUND result on a base dir shows up here. */
-static DWORD WINAPI Ad2GetFileAttributesW(const wchar_t* path)
-{
-    DWORD r = s_gfa_orig(path);
-    if (s_hook_active && PathInteresting(path))
-        Log("GAME GetFileAttributesW: %ls  (ret=0x%lx%s)", path, r,
-            r == INVALID_FILE_ATTRIBUTES ? " NOT-FOUND" : "");
-    return r;
-}
-
-/* fopen: the real level-load path. cocos FileUtils::fillFileData
-   (_stat64i32 + fopen(path,"rb")) loads every .tmx and *_data.xml through
-   the CRT import, invisible to the kernel32 IAT hooks. Hook the game's own
-   fopen import (ucrtbase or msvcrt, resolved at runtime; only the one
-   actually in the game IAT will match a slot). */
-typedef FILE* (__cdecl *FnFopen)(const char*, const char*);
-static FnFopen s_fopen_orig = nullptr;
-
-static bool PathInterestingA(const char* p)
-{
-    if (!p) return false;
-    struct { const char* s; size_t n; } f[] = {
-        { "tmx", 3 }, { "_data.xml", 9 }, { "res/levels", 10 },
-        { "bounty", 6 }, { "dropbox", 7 },
-    };
-    /* case-insensitive substring scan */
-    for (size_t i = 0; i < sizeof(f) / sizeof(f[0]); i++) {
-        for (const char* h = p; *h; ++h) {
-            const char* a = h; size_t j = 0;
-            for (; *a; ++a, ++j) {
-                char la = (*a >= 'A' && *a <= 'Z') ? (char)(*a + 32) : *a;
-                char lb = (f[i].s[j] >= 'A' && f[i].s[j] <= 'Z') ? (char)(f[i].s[j] + 32) : f[i].s[j];
-                if (la != lb) break;
-                if (j + 1 == f[i].n) return true;
-            }
-        }
-    }
-    return false;
-}
-
-static FILE* __cdecl Ad2Fopen(const char* path, const char* mode)
-{
-    FILE* f = s_fopen_orig(path, mode);
-    if (s_hook_active && PathInterestingA(path))
-        Log("GAME fopen: %s  [%s]  (ret=%p%s)", path, mode ? mode : "?",
-            (void*)f, f ? "" : " FAILED");
-    return f;
-}
-
-/* SHGetKnownFolderPath: the base-path getter calls this with
-   FOLDERID_UserGameLocations. Logging every request + result is direct
-   ground truth for the true base path. */
-static void LogGuid(const GUID* g, char* out, size_t n)
-{
-    snprintf(out, n, "{%08X-%04X-%04X-%02X%02X-%02X%02X%02X%02X%02X%02X}",
-             g->Data1, g->Data2, g->Data3, g->Data4[0], g->Data4[1],
-             g->Data4[2], g->Data4[3], g->Data4[4], g->Data4[5], g->Data4[6], g->Data4[7]);
-}
-
-static HRESULT WINAPI Ad2SHGKF(const GUID* rfid, DWORD flags, HANDLE tok, PWSTR* out)
-{
-    HRESULT hr = s_shgkf_orig(rfid, flags, tok, out);
-    if (s_hook_active) {
-        char g[64] = "(null)";
-        if (rfid) LogGuid(rfid, g, sizeof g);
-        if (hr == S_OK && out && *out)
-            Log("GAME SHGetKnownFolderPath %s -> %ls", g, *out);
-        else
-            Log("GAME SHGetKnownFolderPath %s FAILED hr=0x%08lX", g, (unsigned long)hr);
-    }
-    return hr;
-}
-
-/* IAT-slot hook core (same mechanism as the SDL_GL_SwapWindow hook:
-   overwrite the game's import-table slot, no trampolines, no patching of
-   system-DLL code). `expected` is the runtime-resolved address the slot
-   should hold. */
-static uintptr_t HookIatSlot(uintptr_t expected, void* hook, const char* tag)
-{
-    if (!expected) { Log("iat-hook %s: expected address NOT resolvable", tag); return 0; }
-    Log("iat-hook %s: expected=%p", tag, (void*)expected);
-    /* scan the whole IAT region (SDL slot at +0x47e3c0) */
-    for (uintptr_t va = 0x47e000; va < 0x495a00; va += 8) {
-        uintptr_t* slot = (uintptr_t*)(s_module_base + va);
-        if (*slot == expected) {
-            uintptr_t orig = *slot;
-            DWORD old = 0;
-            if (!VirtualProtect(slot, 8, PAGE_READWRITE, &old)) {
-                Log("iat-hook %s: VirtualProtect FAILED %lu", tag, GetLastError());
-                return 0;
-            }
-            *slot = (uintptr_t)hook;
-            DWORD d = 0; VirtualProtect(slot, 8, old, &d);
-            Log("iat-hook %s: PATCHED slot @base+%x (orig=%p)", tag, (unsigned)va, (void*)orig);
-            return orig;
-        }
-    }
-    Log("iat-hook %s: slot NOT FOUND in IAT 0x47e000..0x495a00", tag);
-    return 0;
-}
-
-/* k32/kb variant: the game's slots may hold the kernel32 forwarder or the
-   kernelbase target (match must use the runtime-resolved address of either). */
-static uintptr_t HookIatImport(const char* name, void* hook)
-{
-    HMODULE k32 = GetModuleHandleA("kernel32.dll");
-    HMODULE kb  = GetModuleHandleA("kernelbase.dll");
-    uintptr_t exp[2] = {
-        k32 ? (uintptr_t)GetProcAddress(k32, name) : 0,
-        kb  ? (uintptr_t)GetProcAddress(kb,  name) : 0,
-    };
-    for (int i = 0; i < 2; i++) {
-        if (!exp[i]) continue;
-        uintptr_t r = HookIatSlot(exp[i], hook, name);
-        if (r) return r;
-    }
-    return 0;
-}
-
-static uintptr_t HookIatImportDll(const char* dll, const char* name, void* hook)
-{
-    HMODULE h = GetModuleHandleA(dll);
-    uintptr_t exp = h ? (uintptr_t)GetProcAddress(h, name) : 0;
-    return HookIatSlot(exp, hook, name);
-}
-
-static void InstallFileApiHooks()
-{
-    uintptr_t o1 = HookIatImport("FindFirstFileW", Ad2FindFirstFileW);
-    uintptr_t o2 = HookIatImport("CreateDirectoryW", Ad2CreateDirectoryW);
-    if (o1) s_fff_orig = (FnFindFirstFileW)o1;
-    if (o2) s_cdw_orig = (FnCreateDirectoryW)o2;
-    /* activate only once the scan hooks are set, to avoid a torn state */
-    if (o1 && o2) InterlockedExchange(&s_hook_active, 1);
-    else Log("fileapi: hooks incomplete (fff=%p cdw=%p) -- logging disabled", (void*)o1, (void*)o2);
-
-    /* supplementary capture (each independent; a missing slot just logs) */
-    uintptr_t o3 = HookIatImport("CreateFileW", Ad2CreateFileW);
-    if (o3) s_cfw_orig = (FnCreateFileW)o3;
-    uintptr_t o4 = HookIatImport("CreateFile2", Ad2CreateFile2);
-    if (o4) s_cf2_orig = (FnCreateFile2)o4;
-    uintptr_t o5 = HookIatImport("GetFileAttributesW", Ad2GetFileAttributesW);
-    if (o5) s_gfa_orig = (FnGetFileAttributesW)o5;
-    uintptr_t o6 = HookIatImportDll("shell32.dll", "SHGetKnownFolderPath", Ad2SHGKF);
-    if (o6) s_shgkf_orig = (FnSHGKF)o6;
-    /* CRT fopen: try ucrtbase first, then msvcrt -- whichever address the
-       loader actually bound into the game's IAT is the one that matches. */
-    uintptr_t o7 = HookIatImportDll("ucrtbase.dll", "fopen", Ad2Fopen);
-    if (!o7) o7 = HookIatImportDll("msvcrt.dll", "fopen", Ad2Fopen);
-    if (o7) s_fopen_orig = (FnFopen)o7;
-    Log("fileapi: summary fff=%p cdw=%p cfw=%p cf2=%p gfa=%p shgkf=%p fopen=%p",
-        (void*)o1, (void*)o2, (void*)o3, (void*)o4, (void*)o5, (void*)o6, (void*)o7);
 }
 
 /* ------------------------------------------------------------------ */
@@ -681,7 +438,7 @@ typedef void* (*FnGetWorldData)(void* out, int worldType);
 static void* GetWorldDataHook(void* out, int worldType)
 {
     if (!s_orig_getWorldData) {
-        Log("getWorldData: FATAL -- no trampoline; out buffer left zeroed");
+        ad2mod::Log("getWorldData: FATAL -- no trampoline; out buffer left zeroed");
         return out;
     }
     void* r = ((FnGetWorldData)s_orig_getWorldData)(out, worldType);
@@ -689,31 +446,31 @@ static void* GetWorldDataHook(void* out, int worldType)
     const int stock = f[3];
     const int ov = PoolWorldEffectiveCount(worldType);
     if (ov) f[3] = ov;
-    Log("getWorldData: world=%d(%s) out=%p cnt=%d (stock %d)%s ra0=%08X",
+    ad2mod::Log("getWorldData: world=%d(%s) out=%p cnt=%d (stock %d)%s ra0=%08X",
         worldType, PoolWorldName(worldType), r, f[3], stock,
         ov ? " OVERRIDDEN" : "",
-        (uint32_t)((uintptr_t)_ReturnAddress() - (uintptr_t)s_module_base));
+        (uint32_t)((uintptr_t)_ReturnAddress() - (uintptr_t)ad2mod::s_module_base));
     return r;
 }
 
 static bool InstallGetWorldDataHook()
 {
-    if (MH_Initialize() != MH_OK) { Log("getWorldData: MH_Initialize FAILED"); return false; }
-    void* target = (void*)(s_module_base + 0x2AE190);
-    if (MH_CreateHook(target, (LPVOID)GetWorldDataHook, &s_orig_getWorldData) != MH_OK) {
-        Log("getWorldData: MH_CreateHook FAILED -- REFUSED, stock behavior");
+    if (MH_Initialize() != MH_OK) { ad2mod::Log("getWorldData: MH_Initialize FAILED"); return false; }
+    void* target = anchors::GetPointerFromAnchor(ad2mod::s_module_base, anchors::get_world_data);
+    if (MH_CreateHook(target, reinterpret_cast<void *>(GetWorldDataHook), &s_orig_getWorldData) != MH_OK) {
+        ad2mod::Log("getWorldData: MH_CreateHook FAILED -- REFUSED, stock behavior");
         return false;
     }
     /* EnableHookLL freezes all threads once while it writes the entry; do
        it after the IAT hooks (render path stable) and well before the
        ~t+9s preload block that first fires worldDataForType. */
     if (MH_EnableHook(target) != MH_OK) {
-        Log("getWorldData: MH_EnableHook FAILED -- MH_RemoveHook, stock behavior");
+        ad2mod::Log("getWorldData: MH_EnableHook FAILED -- MH_RemoveHook, stock behavior");
         MH_RemoveHook(target);
         return false;
     }
     s_getWorldData_state = 1;
-    Log("getWorldData: INSTALLED target=%p trampoline=%p", target, s_orig_getWorldData);
+    ad2mod::Log("getWorldData: INSTALLED target=%p trampoline=%p", target, s_orig_getWorldData);
     return true;
 }
 
@@ -723,15 +480,15 @@ static bool InstallGetWorldDataHook()
 static void VerifyEntryHooks()
 {
     if (InterlockedCompareExchange(&s_getWorldData_state, 0, 0) == 1) {
-        uint8_t* p = (uint8_t*)(s_module_base + 0x2AE190);
+        uint8_t* p = (uint8_t*)(ad2mod::s_module_base + 0x2AE190);
         if (p[0] != 0xE9 && s_getWorldData_revert_logged++ < 3)
-            Log("getWorldData: entry REVERTED (bytes %02x %02x %02x %02x) -- VMP? hook disengaged, stock behavior",
+            ad2mod::Log("getWorldData: entry REVERTED (bytes %02x %02x %02x %02x) -- VMP? hook disengaged, stock behavior",
                 p[0], p[1], p[2], p[3]);
     }
     if (InterlockedCompareExchange(&s_getLevel_state, 0, 0) == 1) {
-        uint8_t* p = (uint8_t*)(s_module_base + 0x26C1C0);
+        uint8_t* p = (uint8_t*)(ad2mod::s_module_base + 0x26C1C0);
         if (p[0] != 0xE9 && s_getLevel_revert_logged++ < 3)
-            Log("getLevel: entry REVERTED (bytes %02x %02x %02x %02x) -- VMP? hook disengaged, stock behavior",
+            ad2mod::Log("getLevel: entry REVERTED (bytes %02x %02x %02x %02x) -- VMP? hook disengaged, stock behavior",
                 p[0], p[1], p[2], p[3]);
     }
 }
@@ -858,7 +615,7 @@ static void GetLevelRemap(void* out, int world, int num, int pick, int mode)
         std::string rpath;
         if (PoolRandPick(s_rand_mode, world, &rpath)) {
             reinterpret_cast<std::string*>(out)->assign(rpath);
-            Log("getLevel RAND: mode=%d world=%d(%s) num=%d -> %s",
+            ad2mod::Log("getLevel RAND: mode=%d world=%d(%s) num=%d -> %s",
                 s_rand_mode, world, PoolWorldName(world), num, rpath.c_str());
             return;
         }
@@ -875,7 +632,7 @@ static void GetLevelRemap(void* out, int world, int num, int pick, int mode)
         if (act == 1) pf = only;
     }
     if (!pf) {
-        Log("getLevel REMAP MISS: world=%d(%s) num=%d -- no slot (outside active pool)",
+        ad2mod::Log("getLevel REMAP MISS: world=%d(%s) num=%d -- no slot (outside active pool)",
             world, PoolWorldName(world), num);
         return;
     }
@@ -885,16 +642,16 @@ static void GetLevelRemap(void* out, int world, int num, int pick, int mode)
     char np[192];
     snprintf(np, sizeof np, "levels/versus/%s/%s", w.dir.c_str(), pf->name.c_str());
     reinterpret_cast<std::string*>(out)->assign(np, strlen(np));
-    Log("getLevel REMAP: world=%d(%s) slot=%d %s -> %s",
+    ad2mod::Log("getLevel REMAP: world=%d(%s) slot=%d %s -> %s",
         world, PoolWorldName(world), num, ident, pf->name.c_str());
 }
 
 static void* GetLevelHook(void* out, int world, int num, char mode)
 {
     void* ret = s_orig_getLevel ? ((FnGetLevel)s_orig_getLevel)(out, world, num, mode) : nullptr;
-    if (!s_orig_getLevel) { Log("getLevel: FATAL -- no trampoline; composer NOT run"); return ret; }
+    if (!s_orig_getLevel) { ad2mod::Log("getLevel: FATAL -- no trampoline; composer NOT run"); return ret; }
     /* probe: pick context FUN_14026B9C0 refreshes before the chain. */
-    uintptr_t b = s_module_base;
+    uintptr_t b = ad2mod::s_module_base;
     int pick = (int)*(volatile int32_t*)(b + 0x5B9FF0);      /* DAT_1405b9ff0 */
     int cnt  = (int)*(volatile int32_t*)(b + 0x5DE56C);      /* DAT_1405de56c (d3) */
     int spec = -1;
@@ -907,26 +664,26 @@ static void* GetLevelHook(void* out, int world, int num, char mode)
     GetLevelRemap(out, world, num, pick, (int)mode);   /* slot -> file (stage 2); logs on rewrite/miss */
     char path[160];
     PeekStdString(out, path, sizeof(path));   /* post-rewrite: the final path */
-    Log("getLevel: world=%d(%s) num=%d mode=%d pick=%d spec=%d cnt=%d path=\"%s\" ret=%p ra0=%08X",
+    ad2mod::Log("getLevel: world=%d(%s) num=%d mode=%d pick=%d spec=%d cnt=%d path=\"%s\" ret=%p ra0=%08X",
         world, PoolWorldName(world), num, (int)mode, pick, spec, cnt, path, ret,
-        (uint32_t)((uintptr_t)_ReturnAddress() - (uintptr_t)s_module_base));
+        (uint32_t)((uintptr_t)_ReturnAddress() - (uintptr_t)ad2mod::s_module_base));
     return ret;
 }
 
 static bool InstallGetLevelHook()
 {
-    void* target = (void*)(s_module_base + 0x26C1C0);
-    if (MH_CreateHook(target, (LPVOID)GetLevelHook, &s_orig_getLevel) != MH_OK) {
-        Log("getLevel: MH_CreateHook FAILED -- REFUSED, stock behavior");
+    void* target = anchors::GetPointerFromAnchor(ad2mod::s_module_base, anchors::get_level);
+    if (MH_CreateHook(target, reinterpret_cast<void *>(GetLevelHook), &s_orig_getLevel) != MH_OK) {
+        ad2mod::Log("getLevel: MH_CreateHook FAILED -- REFUSED, stock behavior");
         return false;
     }
     if (MH_EnableHook(target) != MH_OK) {
-        Log("getLevel: MH_EnableHook FAILED -- MH_RemoveHook, stock behavior");
+        ad2mod::Log("getLevel: MH_EnableHook FAILED -- MH_RemoveHook, stock behavior");
         MH_RemoveHook(target);
         return false;
     }
     s_getLevel_state = 1;
-    Log("getLevel: INSTALLED target=%p trampoline=%p", target, s_orig_getLevel);
+    ad2mod::Log("getLevel: INSTALLED target=%p trampoline=%p", target, s_orig_getLevel);
     return true;
 }
 
@@ -959,9 +716,9 @@ static HWND FindGameWindow()
 /* ------------------------------------------------------------------ */
 static void ImGuiInit()
 {
-    Log("ImGuiInit: hwnd=%p dc=%p", (void*)s_hwnd, wglGetCurrentDC());
+    ad2mod::Log("ImGuiInit: hwnd=%p dc=%p", (void*)s_hwnd, wglGetCurrentDC());
     if (!s_hwnd) return;
-    if (!wglGetCurrentDC()) { Log("ImGuiInit: no GL context yet, deferring"); return; }
+    if (!wglGetCurrentDC()) { ad2mod::Log("ImGuiInit: no GL context yet, deferring"); return; }
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -994,7 +751,7 @@ static void ImGuiInit()
         ImFontConfig fc;
         fc.SizePixels = 13.0f * scale;
         io.Fonts->AddFontDefault(&fc);
-        Log("ImGuiInit: dpi=%d scale=%.2f font=%.0fpx", dpi, scale, fc.SizePixels);
+        ad2mod::Log("ImGuiInit: dpi=%d scale=%.2f font=%.0fpx", dpi, scale, fc.SizePixels);
     }
 
     ImGuiStyle& st = ImGui::GetStyle();
@@ -1003,11 +760,11 @@ static void ImGuiInit()
     /* GLSL 120: the game gates on "Ready for OpenGL 2.1"; #version 120
        compiles on 2.1 compat and desktop 3.x alike. */
     if (!ImGui_ImplOpenGL3_Init("#version 120")) {
-        Log("ImGuiInit: ImGui_ImplOpenGL3_Init FAILED (shader compile?)");
+        ad2mod::Log("ImGuiInit: ImGui_ImplOpenGL3_Init FAILED (shader compile?)");
         return;
     }
     s_imgui_ready = true;
-    Log("ImGuiInit: OK (GLSL #version 120)");
+    ad2mod::Log("ImGuiInit: OK (GLSL #version 120)");
 }
 
 static void FeedInput()
@@ -1033,7 +790,7 @@ static void FeedInput()
     static bool s_size_logged = false;
     if (!s_size_logged) {
         s_size_logged = true;
-        Log("sizes: gl_vp=%dx%d sdl_px=%dx%d client=%dx%d", vw[2], vw[3], sw, sh, rc.right, rc.bottom);
+        ad2mod::Log("sizes: gl_vp=%dx%d sdl_px=%dx%d client=%dx%d", vw[2], vw[3], sw, sh, rc.right, rc.bottom);
     }
     if (vw[2] > 0 && vw[3] > 0)
         io.DisplaySize = ImVec2((float)vw[2], (float)vw[3]);
@@ -1117,7 +874,7 @@ static void DrawUI()
         /* global actions (all worlds) */
         if (ImGui::Button("Open res folder")) {
             ShellExecuteA(NULL, "open", s_res_dir, NULL, NULL, SW_SHOWNORMAL);
-            Log("poolui: opened res folder %s", s_res_dir);
+            ad2mod::Log("poolui: opened res folder %s", s_res_dir);
         }
         ImGui::SameLine();
         if (ImGui::Button("Reset All Worlds"))
@@ -1187,7 +944,7 @@ static int Ad2HookedSwap(void* window)
             FeedInput();      /* update io.DisplaySize + queue input BEFORE NewFrame */
             if (!s_gl_info_logged) {
                 s_gl_info_logged = true;
-                Log("first frame: window=%p display=%dx%d", (void*)window,
+                ad2mod::Log("first frame: window=%p display=%dx%d", (void*)window,
                     (int)ImGui::GetIO().DisplaySize.x, (int)ImGui::GetIO().DisplaySize.y);
             }
             ImGui::NewFrame();
@@ -1215,7 +972,7 @@ static bool WaitUnpacked()
 {
     const BYTE want[20] = { 0x48,0x89,0x5C,0x24,0x08, 0x48,0x89,0x6C,0x24,0x10,
                             0x48,0x89,0x74,0x24,0x18, 0x48,0x89,0x7C,0x24,0x20 };
-    const uint8_t* p = (const uint8_t*)(s_module_base + 0x26cce0);
+    const uint8_t* p = (const uint8_t*)(ad2mod::s_module_base + 0x26cce0);
     LARGE_INTEGER t0; QueryPerformanceCounter(&t0);
     LARGE_INTEGER frq; QueryPerformanceFrequency(&frq);
     int logged = 0;
@@ -1223,24 +980,24 @@ static bool WaitUnpacked()
         if (memcmp(p, want, 20) == 0) {
             LARGE_INTEGER t1; QueryPerformanceCounter(&t1);
             double dt = (double)(t1.QuadPart - t0.QuadPart) / frq.QuadPart;
-            Log("unpackgate: UNPACKED after %.2fs -- runtime code bytes verified", dt);
+            ad2mod::Log("unpackgate: UNPACKED after %.2fs -- runtime code bytes verified", dt);
             return true;
         }
         if (i % 25 == 0 && logged++ < 10)
-            Log("unpackgate: still packed (attempt %d) ...", i);
+            ad2mod::Log("unpackgate: still packed (attempt %d) ...", i);
         Sleep(200);
     }
-    Log("unpackgate: TIMEOUT -- bytes at +0x26cce0 = %02x %02x %02x .. %02x %02x %02x",
+    ad2mod::Log("unpackgate: TIMEOUT -- bytes at +0x26cce0 = %02x %02x %02x .. %02x %02x %02x",
         p[0], p[1], p[2], p[17], p[18], p[19]);
     return false;
 }
 
 static DWORD WINAPI Worker(LPVOID)
 {
-    s_module_base = (uintptr_t)GetModuleHandleA(nullptr);
+    ad2mod::s_module_base = (uintptr_t)GetModuleHandleA(nullptr);
 
-    Log("session: ad2ui build %s %s | pid=%lu | module_base=%p",
-        __DATE__, __TIME__, (unsigned long)GetCurrentProcessId(), (void*)s_module_base);
+    ad2mod::Log("session: ad2ui build %s %s | pid=%lu | module_base=%p",
+        __DATE__, __TIME__, (unsigned long)GetCurrentProcessId(), (void*)ad2mod::s_module_base);
 
     /* versus level cache: the per-world .tmx inventory that drives the
        count override (active files per world). Plain file read -- needs
@@ -1260,16 +1017,16 @@ static DWORD WINAPI Worker(LPVOID)
             wchar_t cl[2048] = {0};
             DWORD len = 0;
             if (rpc(GetCurrentProcess(), 0, cl, 2048, &len) == 0)
-                Log("session: cmdline=%ls", cl);
+                ad2mod::Log("session: cmdline=%ls", cl);
             else
-                Log("session: ReadProcessCommandLine FAILED (err=%lu)", GetLastError());
-        } else Log("session: ReadProcessCommandLine not resolvable");
+                ad2mod::Log("session: ReadProcessCommandLine FAILED (err=%lu)", GetLastError());
+        } else ad2mod::Log("session: ReadProcessCommandLine not resolvable");
     }
 
     /* wait until VMP has unpacked the image in place before trusting ANY
        runtime bytes (IAT slot scan, patches). */
     if (!WaitUnpacked()) {
-        Log("worker: ABORTING -- game not unpacked, refusing to patch packed bytes");
+        ad2mod::Log("worker: ABORTING -- game not unpacked, refusing to patch packed bytes");
         return 1;
     }
 
@@ -1280,56 +1037,56 @@ static DWORD WINAPI Worker(LPVOID)
         s3 = GetModuleHandleA("SDL3.dll");
         if (!s3) Sleep(200);
     }
-    Log("worker: module_base=%p SDL3.dll=%p", (void*)s_module_base, (void*)s3);
-    if (!s3) { Log("worker: SDL3.dll NOT loaded after 90s -- giving up"); return 1; }
+    ad2mod::Log("worker: module_base=%p SDL3.dll=%p", (void*)ad2mod::s_module_base, (void*)s3);
+    if (!s3) { ad2mod::Log("worker: SDL3.dll NOT loaded after 90s -- giving up"); return 1; }
 
     s_sdl_get_window_props = (FnSdlGetWindowProperties)GetProcAddress(s3, "SDL_GetWindowProperties");
     s_sdl_get_pointer_prop = (FnSdlGetPointerProperty)GetProcAddress(s3, "SDL_GetPointerProperty");
     s_sdl_get_size_px = (FnSdlGetWindowSizeInPixels)GetProcAddress(s3, "SDL_GetWindowSizeInPixels");
     s_sdl_show_cursor = (FnSdlCursor)GetProcAddress(s3, "SDL_ShowCursor");
     s_sdl_hide_cursor = (FnSdlCursor)GetProcAddress(s3, "SDL_HideCursor");
-    Log("worker: GetWindowProperties=%p GetPointerProperty=%p GetWindowSizeInPixels=%p ShowCursor=%p HideCursor=%p",
+    ad2mod::Log("worker: GetWindowProperties=%p GetPointerProperty=%p GetWindowSizeInPixels=%p ShowCursor=%p HideCursor=%p",
         (void*)s_sdl_get_window_props, (void*)s_sdl_get_pointer_prop,
         (void*)s_sdl_get_size_px, (void*)s_sdl_show_cursor, (void*)s_sdl_hide_cursor);
     uintptr_t real = (uintptr_t)GetProcAddress(s3, "SDL_GL_SwapWindow");
-    Log("worker: SDL_GL_SwapWindow = %p", (void*)real);
-    if (!real) { Log("worker: GetProcAddress failed (%lu)", GetLastError()); return 1; }
+    ad2mod::Log("worker: SDL_GL_SwapWindow = %p", (void*)real);
+    if (!real) { ad2mod::Log("worker: GetProcAddress failed (%lu)", GetLastError()); return 1; }
 
     /* scan the static-IAT region (RVA 0x47e028..0x47eba0) for the slot.
        The game may fill slots at load or resolve later; retry until found. */
     uintptr_t* slot = nullptr;
     for (int attempt = 0; attempt < 100 && !slot; attempt++) {
-        uintptr_t* begin = (uintptr_t*)(s_module_base + 0x47e028);
-        uintptr_t* end   = (uintptr_t*)(s_module_base + 0x47eba0);
+        uintptr_t* begin = (uintptr_t*)(ad2mod::s_module_base + 0x47e028);
+        uintptr_t* end   = (uintptr_t*)(ad2mod::s_module_base + 0x47eba0);
         for (uintptr_t* it = begin; it < end; it++) {
             if (*it == real) { slot = it; break; }
         }
         if (!slot) Sleep(200);
     }
     if (!slot) {
-        Log("worker: IAT slot for SwapWindow NOT FOUND in 0x47e028..0x47eba0");
+        ad2mod::Log("worker: IAT slot for SwapWindow NOT FOUND in 0x47e028..0x47eba0");
         return 1;
     }
-    Log("worker: IAT slot at %p (content=%p)", (void*)slot, (void*)*slot);
+    ad2mod::Log("worker: IAT slot at %p (content=%p)", (void*)slot, (void*)*slot);
 
     /* IAT lives in .rdata (read-only) -- flip the page, patch, restore. */
     s_orig_swap = (int(*)(void*))*slot;
     uintptr_t page = (uintptr_t)slot & ~(uintptr_t)0xFFF;
     DWORD oldProt = 0;
     if (!VirtualProtect((LPVOID)page, 0x1000, PAGE_READWRITE, &oldProt)) {
-        Log("worker: VirtualProtect(%p) FAILED: %lu", (void*)page, GetLastError());
+        ad2mod::Log("worker: VirtualProtect(%p) FAILED: %lu", (void*)page, GetLastError());
         return 1;
     }
     *slot = (uintptr_t)Ad2HookedSwap;
     DWORD dummy = 0;
     VirtualProtect((LPVOID)page, 0x1000, oldProt, &dummy);
     InterlockedExchange(&s_hook_installed, 1);
-    Log("worker: HOOK INSTALLED (orig=%p, page %p prot 0x%lx->restored)",
+    ad2mod::Log("worker: HOOK INSTALLED (orig=%p, page %p prot 0x%lx->restored)",
         (void*)s_orig_swap, (void*)page, oldProt);
-    Log("worker: level-pool overlay ready (Ctrl+Alt+U toggles UI)\n");
+    ad2mod::Log("worker: level-pool overlay ready (Ctrl+Alt+U toggles UI)\n");
 
     /* file-API IAT hooks: runtime path log (match-start diagnostics) */
-    InstallFileApiHooks();
+    hooks_file::InstallFileApiHooks();
 
     /* hook on worldDataForType (defer-and-patch count). Installed after
        the IAT hooks (render path stable) and before the ~t+9s preload
@@ -1359,7 +1116,7 @@ static DWORD WINAPI Worker(LPVOID)
             } else {
                 if (s_sdl_hide_cursor) s_sdl_hide_cursor(0);
             }
-            Log("hotkey: UI %s", s_show_ui ? "shown (cursor on, centered)" : "hidden (cursor off)");
+            ad2mod::Log("hotkey: UI %s", s_show_ui ? "shown (cursor on, centered)" : "hidden (cursor off)");
         }
         prev = d;
     }

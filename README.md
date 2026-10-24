@@ -47,7 +47,7 @@ stock behavior.)
 
 ## Layout
 
-- `src/ad2ui.cpp` — the overlay (IAT + MinHook hooks, ImGui init/UI, diagnostics)
+- `src/ad2mod.cpp` — the overlay (IAT + MinHook hooks, ImGui init/UI, diagnostics)
 - `src/steam_forwards.cpp` — Steam export forwards for the `steam_api64.dll` proxy
 - `imgui/` — [ocornut/imgui](https://github.com/ocornut/imgui) v1.90.9 (submodule)
 - `minhook/` — [TsudaKageyu/MinHook](https://github.com/TsudaKageyu/minhook) (submodule)
