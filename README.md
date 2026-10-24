@@ -32,7 +32,7 @@ build_ui.bat Debug      (with PDBs, for stepping through the DLL)
 ```
 
 Outputs: `build\Release\ad2ui.dll` and `build\Release\steam_api64.dll`
-(the same code; the Steam DLL export table comes from `steam_forwards.cpp`,
+(the same code; the Steam DLL export table comes from `src/steam_forwards.cpp`,
 built with `/G4` to match Steam's x64 ABI guard pages). Line endings are
 CRLF (`.gitattributes`).
 
@@ -47,7 +47,7 @@ stock behavior.)
 
 ## Layout
 
-- `ad2ui.cpp` — the overlay (IAT + MinHook hooks, ImGui init/UI, diagnostics)
-- `steam_forwards.cpp` — Steam export forwards for the `steam_api64.dll` proxy
+- `src/ad2ui.cpp` — the overlay (IAT + MinHook hooks, ImGui init/UI, diagnostics)
+- `src/steam_forwards.cpp` — Steam export forwards for the `steam_api64.dll` proxy
 - `imgui/` — [ocornut/imgui](https://github.com/ocornut/imgui) v1.90.9 (submodule)
 - `minhook/` — [TsudaKageyu/MinHook](https://github.com/TsudaKageyu/minhook) (submodule)
