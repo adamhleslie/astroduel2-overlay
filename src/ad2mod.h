@@ -9,4 +9,5 @@ namespace ad2mod
     void Log(const char* fmt, ...);
 
     extern uintptr_t s_module_base; /* main module (AstroDuel2.exe) */
+    extern HINSTANCE s_dll_instance; /* our module */
 }

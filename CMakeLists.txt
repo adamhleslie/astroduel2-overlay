@@ -33,7 +33,10 @@ endif ()
 add_library(steam_api64 SHARED
     src/ad2mod.cpp
     src/steam_forwards.cpp
-    src/hooks_file.cpp)
+    src/hooks_file.cpp
+    src/hooks_game.cpp
+    src/level_pool.cpp
+    src/overlay.cpp)
 
 # TODO: Investigate refactoring to use RtlCaptureStackBackTrace
 # /Oy- (disable frame-pointer omission) for _ReturnAddress() reliability
