@@ -1,7 +1,7 @@
 #pragma once
 
-namespace hooks_game
+namespace hooks::game
 {
-    bool InstallGetWorldDataHook();
-    bool InstallGetLevelHook();
+	bool InstallGetWorldDataHook();
+	bool InstallGetLevelHook();
 }

@@ -31,7 +31,7 @@ endif ()
 
 # Overlay + steam_api64 proxy
 add_library(steam_api64 SHARED
-    src/ad2mod.cpp
+    src/mod.cpp
     src/steam_forwards.cpp
     src/hooks_file.cpp
     src/hooks_game.cpp

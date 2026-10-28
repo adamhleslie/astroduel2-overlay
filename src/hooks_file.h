@@ -1,6 +1,6 @@
 #pragma once
 
-namespace hooks_file
+namespace hooks::file
 {
-    void InstallFileApiHooks();
+	void InstallHooks();
 }

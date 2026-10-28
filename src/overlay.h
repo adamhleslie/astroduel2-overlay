@@ -2,6 +2,6 @@
 
 namespace overlay
 {
-    bool OverlayInit();
-    void OverlayLoop();
+	bool Init();
+	void Loop();
 }
