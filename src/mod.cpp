@@ -53,7 +53,7 @@
 #include <vector>
 #include <winnt.h> // TODO: Investigate refactoring to use RtlCaptureStackBackTrace
 
-#include "hooks_file.h"
+#include "hooks_iat.h"
 #include "hooks_game.h"
 #include "level_pool.h"
 #include "overlay.h"
@@ -199,7 +199,7 @@ static DWORD WINAPI Worker(LPVOID)
 	if (!overlay::Init()) { return 1; }
 
 	/* file-API IAT hooks: runtime path log (match-start diagnostics) */
-	hooks::file::InstallHooks();
+	hooks::iat::InstallHooks();
 
 	/* hook on worldDataForType (defer-and-patch count). Installed after
 	   the IAT hooks (render path stable) and before the ~t+9s preload

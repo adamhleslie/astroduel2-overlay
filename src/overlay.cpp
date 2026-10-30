@@ -161,12 +161,12 @@ namespace
 		GetClientRect(hwnd, &rc);
 		int sw = 0, sh = 0;
 		if (sdlWindow && sdlGetSizePx) sdlGetSizePx(sdlWindow, &sw, &sh);
-		bool s_size_logged = false;
-		if (!s_size_logged)
-		{
-			s_size_logged = true;
-			mod::Log("sizes: gl_vp=%dx%d sdl_px=%dx%d client=%dx%d", vw[2], vw[3], sw, sh, rc.right, rc.bottom);
-		}
+		// bool s_size_logged = false;
+		// if (!s_size_logged)
+		// {
+		// 	s_size_logged = true;
+		// 	mod::Log("sizes: gl_vp=%dx%d sdl_px=%dx%d client=%dx%d", vw[2], vw[3], sw, sh, rc.right, rc.bottom);
+		// }
 		if (vw[2] > 0 && vw[3] > 0)
 			io.DisplaySize = ImVec2((float) vw[2], (float) vw[3]);
 		else if (sw > 0 && sh > 0)

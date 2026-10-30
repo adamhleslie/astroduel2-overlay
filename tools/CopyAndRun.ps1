@@ -8,7 +8,9 @@
 
 param(
     [Parameter(Mandatory = $true, Position = 0)]
-    [string]$TargetPath   # required: the Astro Duel 2 directory
+    [string]$TargetPath, # required: the Astro Duel 2 directory
+
+    [switch]$NoRun
 )
 
 # Options:
@@ -51,11 +53,13 @@ $copyDest = Join-Path $TargetPath $SteamDLL
 Copy-Item -LiteralPath $CopySource -Destination $copyDest -Force
 Write-Host "Copied '$CopySource' -> '$copyDest'."
 
-# Run game
-$exePath = Join-Path $TargetPath $Executable
-if (-not (Test-Path -LiteralPath $exePath)) {
-    Write-Error "Executable not found: $exePath"
-    exit 1
-}
+if (-not $NoRun) {
+    # Run game
+    $exePath = Join-Path $TargetPath $Executable
+    if (-not (Test-Path -LiteralPath $exePath)) {
+        Write-Error "Executable not found: $exePath"
+        exit 1
+    }
 
-Start-Process -FilePath "$exePath"
+    Start-Process -FilePath "$exePath"
+}

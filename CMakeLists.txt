@@ -33,7 +33,7 @@ endif ()
 add_library(steam_api64 SHARED
     src/mod.cpp
     src/steam_forwards.cpp
-    src/hooks_file.cpp
+    src/hooks_iat.cpp
     src/hooks_game.cpp
     src/level_pool.cpp
     src/overlay.cpp)
