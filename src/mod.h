@@ -6,6 +6,7 @@
 
 namespace mod
 {
+	void Main();
 	void Log(const char* fmt, ...);
 
 	extern uintptr_t moduleBase; /* main module (AstroDuel2.exe) */

@@ -1,3 +1,19 @@
+/* Render strategy:
+*   - Worker thread (DllMain-spawned) waits for the game to settle, then
+*     IAT-hooks SDL_GL_SwapWindow: the game's IAT import directory is
+*     packer-forged, so we do NOT parse the PE. Instead:
+*         real_addr = GetProcAddress(GetModuleHandleA("SDL3.dll"), "SDL_GL_SwapWindow")
+*         slot      = scan known IAT region (RVA 0x47e028..0x47eba0) for == real_addr
+*     and patch that one slot to point at our hook.
+*   - The hook runs ON THE GAME'S RENDER THREAD, where the game's GL context
+*     is current -- exactly where we want to draw.
+*   - Lazy-inits ImGui (desktop GL backend, built-in gl3w-stripped loader,
+*     GLSL "#version 120" for the game's 2.1-compat context) on first swap.
+*   - Input: manual Win32 (GetCursorPos/ScreenToClient + GetAsyncKeyState),
+*     no WndProc subclassing. Reads are non-consuming, so the game still gets
+*     W/X/Y for its own level picker.
+*   - UI toggle: Ctrl+Alt+U (polled in worker thread, edge-triggered).
+*/
 #include "overlay.h"
 
 #include "imgui.h"

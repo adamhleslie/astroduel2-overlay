@@ -31,6 +31,7 @@ endif ()
 
 # Overlay + steam_api64 proxy
 add_library(steam_api64 SHARED
+    src/dllmain.cpp
     src/mod.cpp
     src/steam_forwards.cpp
     src/hooks_iat.cpp

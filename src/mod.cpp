@@ -1,56 +1,25 @@
-/* ad2mod.cpp -- in-game ImGui overlay for Astro Duel 2 injected as proxy steam dll
+/* mod.cpp -- in-game ImGui overlay for Astro Duel 2 injected as proxy steam dll
  * DllMain spawns one worker thread that:
- *   1. waits for VMP to unpack the image in place (UNPACK GATE below),
- *   2. IAT-hooks SDL_GL_SwapWindow to render an ImGui overlay on the
- *      game's own GL context (render strategy below),
- *   3. IAT-hooks the file APIs (kernel32/shell32/CRT fopen) for a
- *      runtime path log of what the game reads,
- *   4. installs MinHook LOG-ONLY hooks on the level-pool pipeline:
- *     GetWorldDataHook @ 0x1402ae190 WorldDataLoader::worldDataForType --
- *             the per-world level-count provider. Logs worldType + ra0
- *             (which call site fired). Defer-and-patch: the trampoline
- *             fills the out struct, we own only d3 (the count) and
- *             override it per world with the versus level cache's
- *             active-file count; worlds not in the cache run stock.
- *     GetLevelHook @ 0x14026C1C0 getLevelString -- the level-string
- *             composer every level-load path goes through (4 call sites
- *             binary-wide). Logs world/num/mode + the composed path + ra0
- *             (which composer fired) + the pick context globals.
- *     All MinHook hooks log the module-relative return address (ra0) via
- *     _ReturnAddress() -- /Oy- in CMakeLists keeps the frame pointer so
- *     it is valid (the entry patch is an absolute JMP; the game's CALL
- *     pushed the real rip before we arrived).
+ *   1. Waits for VMP to unpack the image in place
+ *   2. Initializes the imgui overlay
+ *   3. Installs hooks under, via hooks:: namespaces
+ *   4. Runs the overlay loop
  *   All diagnostics -> %LOCALAPPDATA%\AstroDuel2Mod\probe_ui.log
  *
- *   UNPACK GATE: the game ships VMP-packed, and loaded at import
+ *  VMP Unpack: the game ships VMP-packed, and loaded at import
  *   resolution (steam_api64 proxy) the stub has NOT run yet -- sections
  *   are still ciphertext. Because all 117 .tmx levels are preloaded in
  *   one ~450 ms block ~10 s after process start, the worker polls until
  *   the VMP stub has unpacked the image in place (verified by the
  *   20-byte prologue at RVA 0x26cce0) before patching anything. If the
  *   image is already unpacked, the gate passes on the first check.
- *
- * Render strategy:
- *   - Worker thread (DllMain-spawned) waits for the game to settle, then
- *     IAT-hooks SDL_GL_SwapWindow: the game's IAT import directory is
- *     packer-forged, so we do NOT parse the PE. Instead:
- *         real_addr = GetProcAddress(GetModuleHandleA("SDL3.dll"), "SDL_GL_SwapWindow")
- *         slot      = scan known IAT region (RVA 0x47e028..0x47eba0) for == real_addr
- *     and patch that one slot to point at our hook.
- *   - The hook runs ON THE GAME'S RENDER THREAD, where the game's GL context
- *     is current -- exactly where we want to draw.
- *   - Lazy-inits ImGui (desktop GL backend, built-in gl3w-stripped loader,
- *     GLSL "#version 120" for the game's 2.1-compat context) on first swap.
- *   - Input: manual Win32 (GetCursorPos/ScreenToClient + GetAsyncKeyState),
- *     no WndProc subclassing. Reads are non-consuming, so the game still gets
- *     W/X/Y for its own level picker.
- *   - UI toggle: Ctrl+Alt+U (polled in worker thread, edge-triggered).
  */
 #include "mod.h"
 
 #include <cstdint>
 #include <cstdlib>
-#include <vector>
+#include <process.h>
+#include <thread>
 #include <winnt.h> // TODO: Investigate refactoring to use RtlCaptureStackBackTrace
 
 #include "hooks_iat.h"
@@ -153,12 +122,11 @@ static bool WaitUnpacked()
 	return false;
 }
 
-static DWORD WINAPI Worker(LPVOID)
+void mod::Main()
 {
-	mod::moduleBase = (uintptr_t) GetModuleHandleA(nullptr);
+	moduleBase = (uintptr_t) GetModuleHandleA(nullptr);
 
-	mod::Log("session: ad2ui build %s %s | pid=%lu | module_base=%p",
-	         __DATE__, __TIME__, (unsigned long) GetCurrentProcessId(), (void*) mod::moduleBase);
+	Log("session: ad2ui build %s %s | pid=%lu | module_base=%p", __DATE__, __TIME__, (unsigned long) GetCurrentProcessId(), (void*) mod::moduleBase);
 
 	/* versus level cache: the per-world .tmx inventory that drives the
 	   count override (active files per world). Plain file read -- needs
@@ -166,37 +134,21 @@ static DWORD WINAPI Worker(LPVOID)
 	   the log before the first getWorldData call. */
 	level_pool::Init();
 	{
-		/* the game's own command line */
-		typedef long (WINAPI *FnReadProcCmdLine)(HANDLE, DWORD, PWSTR, DWORD, PDWORD);
-		FnReadProcCmdLine rpc = nullptr;
-		HMODULE hk = GetModuleHandleA("kernel32.dll");
-		if (hk) rpc = (FnReadProcCmdLine) GetProcAddress(hk, "ReadProcessCommandLine");
-		if (!rpc)
-		{
-			hk = GetModuleHandleA("kernelbase.dll");
-			if (hk) rpc = (FnReadProcCmdLine) GetProcAddress(hk, "ReadProcessCommandLine");
-		}
-		if (rpc)
-		{
-			wchar_t cl[2048] = {0};
-			DWORD len = 0;
-			if (rpc(GetCurrentProcess(), 0, cl, 2048, &len) == 0)
-				mod::Log("session: cmdline=%ls", cl);
-			else
-				mod::Log("session: ReadProcessCommandLine FAILED (err=%lu)", GetLastError());
-		}
-		else mod::Log("session: ReadProcessCommandLine not resolvable");
+		// TODO: Refactor to use NtQueryInformationProcess ?
+		
+		char* cl = GetCommandLineA();
+		Log("session: cmdline=%ls", cl);
 	}
 
 	/* wait until VMP has unpacked the image in place before trusting ANY
 	   runtime bytes (IAT slot scan, patches). */
 	if (!WaitUnpacked())
 	{
-		mod::Log("worker: ABORTING -- game not unpacked, refusing to patch packed bytes");
-		return 1;
+		Log("worker: ABORTING -- game not unpacked, refusing to patch packed bytes");
+		return;
 	}
 
-	if (!overlay::Init()) { return 1; }
+	if (!overlay::Init()) { return; }
 
 	/* file-API IAT hooks: runtime path log (match-start diagnostics) */
 	hooks::iat::InstallHooks();
@@ -213,18 +165,4 @@ static DWORD WINAPI Worker(LPVOID)
 	hooks::game::InstallGetLevelHook();
 
 	overlay::Loop();
-
-	return 0;
-}
-
-BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID)
-{
-	if (reason == DLL_PROCESS_ATTACH)
-	{
-		mod::dllInstance = h;
-		DisableThreadLibraryCalls(h);
-		HANDLE th = CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
-		if (th) CloseHandle(th);
-	}
-	return TRUE;
 }
