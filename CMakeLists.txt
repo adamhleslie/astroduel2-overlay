@@ -2,7 +2,7 @@
 cmake_minimum_required(VERSION 3.25)
 project(astroduel2-overlay LANGUAGES C CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # imgui w/ OpenGL3 backend

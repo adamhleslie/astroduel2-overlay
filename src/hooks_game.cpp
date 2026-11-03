@@ -66,10 +66,9 @@ static void* GetWorldDataHook(void* out, int worldType)
 	const int stock = f[3];
 	const int ov = level_pool::PoolWorldEffectiveCount(worldType);
 	if (ov) f[3] = ov;
-	mod::Log("getWorldData: world=%d(%s) out=%p cnt=%d (stock %d)%s ra0=%08X",
+	mod::Log("getWorldData: world={}({}) out={} cnt={} (stock {}){} ra0={:#010X}",
 	         worldType, level_pool::PoolWorldName(worldType), r, f[3], stock,
-	         ov ? " OVERRIDDEN" : "",
-	         (uint32_t) ((uintptr_t) _ReturnAddress() - mod::moduleBase));
+	         ov ? " OVERRIDDEN" : "",(uint32_t) ((uintptr_t) _ReturnAddress() - mod::moduleBase));
 	return r;
 }
 
@@ -96,7 +95,7 @@ bool hooks::game::InstallGetWorldDataHook()
 		return false;
 	}
 	getWorldDataState = 1;
-	mod::Log("getWorldData: INSTALLED target=%p trampoline=%p", target, getWorldDataOrig);
+	mod::Log("getWorldData: INSTALLED target={} trampoline={}", target, getWorldDataOrig);
 	return true;
 }
 
@@ -258,8 +257,7 @@ static void GetLevelRemap(void* out, int world, int num, int pick, int mode)
 		if (PoolRandPick(level_pool::randMode, world, &rpath))
 		{
 			reinterpret_cast<std::string*>(out)->assign(rpath);
-			mod::Log("getLevel RAND: mode=%d world=%d(%s) num=%d -> %s",
-			         level_pool::randMode, world, level_pool::PoolWorldName(world), num, rpath.c_str());
+			mod::Log("getLevel RAND: mode={} world={}({}) num={} -> {}", static_cast<int>(level_pool::randMode), world, level_pool::PoolWorldName(world), num, rpath);
 			return;
 		}
 	}
@@ -287,8 +285,7 @@ static void GetLevelRemap(void* out, int world, int num, int pick, int mode)
 	}
 	if (!pf)
 	{
-		mod::Log("getLevel REMAP MISS: world=%d(%s) num=%d -- no slot (outside active pool)",
-		         world, level_pool::PoolWorldName(world), num);
+		mod::Log("getLevel REMAP MISS: world={}({}) num={} -- no slot (outside active pool)", world, level_pool::PoolWorldName(world), num);
 		return;
 	}
 	char ident[48];
@@ -297,8 +294,7 @@ static void GetLevelRemap(void* out, int world, int num, int pick, int mode)
 	char np[192];
 	snprintf(np, sizeof np, "levels/versus/%s/%s", w.dir.c_str(), pf->name.c_str());
 	reinterpret_cast<std::string*>(out)->assign(np, strlen(np));
-	mod::Log("getLevel REMAP: world=%d(%s) slot=%d %s -> %s",
-	         world, level_pool::PoolWorldName(world), num, ident, pf->name.c_str());
+	mod::Log("getLevel REMAP: world={}({}) slot={} {} -> {}", world, level_pool::PoolWorldName(world), num, ident, pf->name.c_str());
 }
 
 static void* GetLevelHook(void* out, int world, int num, char mode)
@@ -324,7 +320,7 @@ static void* GetLevelHook(void* out, int world, int num, char mode)
 	GetLevelRemap(out, world, num, pick, mode); /* slot -> file (stage 2); logs on rewrite/miss */
 	char path[160];
 	PeekStdString(out, path, sizeof(path)); /* post-rewrite: the final path */
-	mod::Log("getLevel: world=%d(%s) num=%d mode=%d pick=%d spec=%d cnt=%d path=\"%s\" ret=%p ra0=%08X",
+	mod::Log("getLevel: world={}({}) num={} mode={} pick={} spec={} cnt={} path=\"{}\" ret={} ra0={:#010X}",
 	         world, level_pool::PoolWorldName(world), num, (int) mode, pick, spec, cnt, path, ret,
 	         (uint32_t) ((uintptr_t) _ReturnAddress() - mod::moduleBase));
 	return ret;
@@ -345,6 +341,6 @@ bool hooks::game::InstallGetLevelHook()
 		return false;
 	}
 	getLevelState = 1;
-	mod::Log("getLevel: INSTALLED target=%p trampoline=%p", target, getLevelOrig);
+	mod::Log("getLevel: INSTALLED target={} trampoline={}", target, getLevelOrig);
 	return true;
 }

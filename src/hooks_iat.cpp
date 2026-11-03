@@ -23,18 +23,27 @@ namespace
 	typedef HRESULT (WINAPI *FnShellGetKnownFolder)(REFKNOWNFOLDERID, DWORD, HANDLE, PWSTR*);
 	FnShellGetKnownFolder shellGetKnownFolderOrig = nullptr;
 
+	// TODO: Make more performant
+	std::string LPCWSTRToString(LPCWSTR lpStr)
+	{
+		int strLength = WideCharToMultiByte(CP_UTF8, 0, lpStr, -1, nullptr, 0, nullptr, nullptr);
+		std::string str(strLength, 0);
+		WideCharToMultiByte(CP_UTF8, 0, lpStr, -1, &str[0], strLength, nullptr, nullptr);
+		return str;
+	}
+
 	HANDLE WINAPI CreateFileWHook(LPCWSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode, LPSECURITY_ATTRIBUTES lpSecurityAttributes,
 										DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes, HANDLE hTemplateFile)
 	{
 		HANDLE result = createFileWOrig(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
-		mod::Log("GAME CreateFileW: %ls (result=%p, error=%lu)", lpFileName, result, GetLastError());
+		mod::Log("GAME CreateFileW: {} (result={}, error={})", LPCWSTRToString(lpFileName), result, GetLastError());
 		return result;
 	}
 
 	DWORD WINAPI GetFileAttributesWHook(LPCWSTR lpFileName)
 	{
 		DWORD result = getFileAttributesWOrig(lpFileName);
-		mod::Log("GAME GetFileAttributesW: %ls (result=0x%lx%s, error=%lu)", lpFileName, result, (result == INVALID_FILE_ATTRIBUTES ? " NOT-FOUND" : ""), GetLastError());
+		mod::Log("GAME GetFileAttributesW: {} (result={:#x}{}, error={})", LPCWSTRToString(lpFileName), result, (result == INVALID_FILE_ATTRIBUTES ? " NOT-FOUND" : ""), GetLastError());
 		return result;
 	}
 
@@ -50,11 +59,11 @@ namespace
 		HRESULT result = shellGetKnownFolderOrig(rfid, dwFlags, hToken, ppszPath);
 		if (result == S_OK && ppszPath && *ppszPath)
 		{
-			mod::Log("GAME SHGetKnownFolderPath %s -> %ls", guidString, *ppszPath);
+			mod::Log("GAME SHGetKnownFolderPath {} -> {}", guidString, LPCWSTRToString(*ppszPath));
 		}
 		else
 		{
-			mod::Log("GAME SHGetKnownFolderPath %s FAILED hr=0x%08lX", guidString, static_cast<unsigned long>(result));
+			mod::Log("GAME SHGetKnownFolderPath {} FAILED hr={:#010X}", guidString, static_cast<unsigned long>(result));
 		}
 
 		return result;
@@ -65,7 +74,7 @@ namespace
 	{
 		if (!address)
 		{
-			mod::Log("iat-hook %s: address is null", name);
+			mod::Log("iat-hook {}: address is null", name);
 			return false;
 		}
 
@@ -79,16 +88,16 @@ namespace
 				DWORD oldProtect = 0;
 				if (!VirtualProtect(slotAddress, 8, newProtect, &oldProtect))
 				{
-					mod::Log("iat-hook %s: VirtualProtect FAILED %lu", name, GetLastError());
+					mod::Log("iat-hook {}: VirtualProtect FAILED {}", name, GetLastError());
 					return false;
 				}
 				*slotAddress = hookAddress;
 				VirtualProtect(slotAddress, 8, oldProtect, &newProtect);
-				mod::Log("iat-hook %s: PATCHED slot @base0x+%x (orig=%p)", name, static_cast<unsigned>(slotOffset), reinterpret_cast<void*>(address));
+				mod::Log("iat-hook {}: PATCHED slot @base0x+{:x} (orig={})", name, static_cast<unsigned>(slotOffset), reinterpret_cast<void*>(address));
 				return true;
 			}
 		}
-		mod::Log("iat-hook %s: slot NOT FOUND in IAT 0x%x..0x%x", name, static_cast<unsigned>(iatRegionStart), static_cast<unsigned>(iatRegionEnd));
+		mod::Log("iat-hook {}: slot NOT FOUND in IAT {:#x}..{:#x}", name, static_cast<unsigned>(iatRegionStart), static_cast<unsigned>(iatRegionEnd));
 		return false;
 	}
 
@@ -123,6 +132,6 @@ void hooks::iat::InstallHooks()
 	HookIatForKernelDll("CreateFileW", CreateFileWHook, createFileWOrig);
 	HookIatForKernelDll("GetFileAttributesW", GetFileAttributesWHook, getFileAttributesWOrig);
 	HookIatForModule("shell32.dll", "SHGetKnownFolderPath", ShellGetKnownFolderPathHook, shellGetKnownFolderOrig);
-	mod::Log("iat-hook Original Addresses: createFileW=%p getFileAttributesW=%p getKnownFolderPath=%p",
+	mod::Log("iat-hook Original Addresses: createFileW={} getFileAttributesW={} getKnownFolderPath={}",
 		reinterpret_cast<void*>(createFileWOrig), reinterpret_cast<void*>(getFileAttributesWOrig), reinterpret_cast<void*>(shellGetKnownFolderOrig));
 }

@@ -101,7 +101,7 @@ namespace
 	/* ------------------------------------------------------------------ */
 	void ImGuiInit()
 	{
-		mod::Log("ImGuiInit: hwnd=%p dc=%p", (void*) hwnd, wglGetCurrentDC());
+		mod::Log("ImGuiInit: hwnd={} dc={}", (void*)hwnd, (void*)wglGetCurrentDC());
 		if (!hwnd) return;
 		if (!wglGetCurrentDC())
 		{
@@ -140,7 +140,7 @@ namespace
 			ImFontConfig fc;
 			fc.SizePixels = 13.0f * scale;
 			io.Fonts->AddFontDefault(&fc);
-			mod::Log("ImGuiInit: dpi=%d scale=%.2f font=%.0fpx", dpi, scale, fc.SizePixels);
+			mod::Log("ImGuiInit: dpi={} scale={:.2f} font={:.0f}px", dpi, scale, fc.SizePixels);
 		}
 
 		ImGuiStyle& st = ImGui::GetStyle();
@@ -286,7 +286,7 @@ namespace
 				if (!glInfoLogged)
 				{
 					glInfoLogged = true;
-					mod::Log("first frame: window=%p display=%dx%d", (void*) window,
+					mod::Log("first frame: window={} display={}x{}", (void*) window,
 					         (int) ImGui::GetIO().DisplaySize.x, (int) ImGui::GetIO().DisplaySize.y);
 				}
 				ImGui::NewFrame();
@@ -309,7 +309,7 @@ bool overlay::Init()
 		s3 = GetModuleHandleA("SDL3.dll");
 		if (!s3) Sleep(200);
 	}
-	mod::Log("worker: module_base=%p SDL3.dll=%p", (void*) mod::moduleBase, (void*) s3);
+	mod::Log("worker: module_base={} SDL3.dll={}", (void*) mod::moduleBase, (void*) s3);
 	if (!s3)
 	{
 		mod::Log("worker: SDL3.dll NOT loaded after 90s -- giving up");
@@ -322,14 +322,14 @@ bool overlay::Init()
 	sdlShowCursor = (FnSdlCursor) GetProcAddress(s3, "SDL_ShowCursor");
 	sdlHideCursor = (FnSdlCursor) GetProcAddress(s3, "SDL_HideCursor");
 	mod::Log(
-		"worker: GetWindowProperties=%p GetPointerProperty=%p GetWindowSizeInPixels=%p ShowCursor=%p HideCursor=%p",
+		"worker: GetWindowProperties={} GetPointerProperty={} GetWindowSizeInPixels={} ShowCursor={} HideCursor={}",
 		(void*) sdlGetWindowProps, (void*) sdlGetPointerProp,
 		(void*) sdlGetSizePx, (void*) sdlShowCursor, (void*) sdlHideCursor);
 	uintptr_t real = (uintptr_t) GetProcAddress(s3, "SDL_GL_SwapWindow");
-	mod::Log("worker: SDL_GL_SwapWindow = %p", (void*) real);
+	mod::Log("worker: SDL_GL_SwapWindow = {}", (void*) real);
 	if (!real)
 	{
-		mod::Log("worker: GetProcAddress failed (%lu)", GetLastError());
+		mod::Log("worker: GetProcAddress failed ({})", GetLastError());
 		return false;
 	}
 
@@ -355,7 +355,7 @@ bool overlay::Init()
 		mod::Log("worker: IAT slot for SwapWindow NOT FOUND in 0x47e028..0x47eba0");
 		return false;
 	}
-	mod::Log("worker: IAT slot at %p (content=%p)", (void*) slot, (void*) *slot);
+	mod::Log("worker: IAT slot at {} (content={})", (void*) slot, (void*) *slot);
 
 	/* IAT lives in .rdata (read-only) -- flip the page, patch, restore. */
 	origSwap = (int(*)(void*)) *slot;
@@ -363,14 +363,14 @@ bool overlay::Init()
 	DWORD oldProt = 0;
 	if (!VirtualProtect((LPVOID) page, 0x1000, PAGE_READWRITE, &oldProt))
 	{
-		mod::Log("worker: VirtualProtect(%p) FAILED: %lu", (void*) page, GetLastError());
+		mod::Log("worker: VirtualProtect({}) FAILED: {}", (void*) page, GetLastError());
 		return false;
 	}
 	*slot = (uintptr_t) Ad2HookedSwap;
 	DWORD dummy = 0;
 	VirtualProtect((LPVOID) page, 0x1000, oldProt, &dummy);
 	InterlockedExchange(&hookInstalled, 1);
-	mod::Log("worker: HOOK INSTALLED (orig=%p, page %p prot 0x%lx->restored)",
+	mod::Log("worker: HOOK INSTALLED (orig={}, page {} prot {:#x}->restored)",
 	         (void*) origSwap, (void*) page, oldProt);
 	mod::Log("worker: level-pool overlay ready (Ctrl+Alt+U toggles UI)\n");
 	return true;
@@ -401,7 +401,7 @@ void overlay::Loop()
 			{
 				if (sdlHideCursor) sdlHideCursor(0);
 			}
-			mod::Log("hotkey: UI %s", showUi ? "shown (cursor on, centered)" : "hidden (cursor off)");
+			mod::Log("hotkey: UI {}", showUi ? "shown (cursor on, centered)" : "hidden (cursor off)");
 		}
 		prev = d;
 	}

@@ -1,5 +1,4 @@
-/* mod.cpp -- in-game ImGui overlay for Astro Duel 2 injected as proxy steam dll
- * DllMain spawns one worker thread that:
+/* mod.cpp -- in-game ImGui overlay for Astro Duel 2 injected as proxy steam dll running on a thread spun up on DllMain:
  *   1. Waits for VMP to unpack the image in place
  *   2. Initializes the imgui overlay
  *   3. Installs hooks under, via hooks:: namespaces
@@ -17,10 +16,12 @@
 #include "mod.h"
 
 #include <cstdint>
-#include <cstdlib>
-#include <process.h>
-#include <thread>
+#include <filesystem>
+#include <fstream>
+#include <mutex>
+#include <shlobj_core.h>
 #include <winnt.h> // TODO: Investigate refactoring to use RtlCaptureStackBackTrace
+#include <print>
 
 #include "hooks_iat.h"
 #include "hooks_game.h"
@@ -29,53 +30,48 @@
 
 uintptr_t mod::moduleBase = 0;
 HINSTANCE mod::dllInstance = nullptr;
+std::mutex mod::internal::logMutex;
+std::ofstream mod::internal::logFileStream;
 
-/* ------------------------------------------------------------------ */
-/* logging                                                             */
-/* ------------------------------------------------------------------ */
-static FILE* logFile = nullptr;
-/* log() is called from several threads (file-API hooks run on game threads,
-   the watchdog on the worker thread) -- FILE* is not thread-safe, so every
-   write is serialized. In practice the first call comes from the worker
-   before any hook is installed, so the lazy init below is single-threaded. */
-static CRITICAL_SECTION logCriticalSection;
-static volatile LONG logCriticalSectionInit = 0;
-
-void mod::Log(const char* fmt, ...)
+namespace
 {
-	if (InterlockedCompareExchange(&logCriticalSectionInit, 1, 0) == 0)
-		InitializeCriticalSection(&logCriticalSection);
-	EnterCriticalSection(&logCriticalSection);
-	if (!logFile)
+	bool InitLog()
 	{
-		wchar_t dir[1024];
-		if (GetEnvironmentVariableW(L"LOCALAPPDATA", dir, 1024))
+		std::filesystem::path logFilePath;
 		{
-			char dirA[1024];
-			WideCharToMultiByte(CP_UTF8, 0, dir, -1, dirA, 1024, nullptr, nullptr);
-			char path[1200];
-			char sub[1200];
-			snprintf(sub, sizeof(sub), "%s\\AstroDuel2Mod", dirA);
-			snprintf(path, sizeof(path), "%s\\probe_ui.log", sub);
-			CreateDirectoryA(sub, nullptr);
-			logFile = fopen(path, "a");
-			if (logFile) setvbuf(logFile, nullptr, _IOFBF, 4096);
+			// Get the local app data path on windows, which our log file is relative to
+			PWSTR appDataPath;
+			if (SHGetKnownFolderPath(mod::logFileFolderId, 0, nullptr, &appDataPath) != S_OK)
+			{
+				// Could not retrieve the local app data path
+				CoTaskMemFree(appDataPath);
+				return false;
+			}
+			logFilePath = std::filesystem::path{appDataPath};
+			CoTaskMemFree(appDataPath);
 		}
+		logFilePath.append(mod::logFile);
+
+		if (!logFilePath.has_filename())
+		{
+			// No file provided
+			return false;
+		}
+
+		if (logFilePath.has_parent_path())
+		{
+			std::error_code error;
+			std::filesystem::create_directories(logFilePath.parent_path(), error);
+			if (error.value())
+			{
+				// Could not create directories
+				return false;
+			}
+		}
+
+		mod::internal::logFileStream.open(logFilePath, std::ofstream::out | std::ofstream::app);
+		return mod::internal::logFileStream.is_open();
 	}
-	FILE* f = logFile;
-	if (f)
-	{
-		SYSTEMTIME st;
-		GetLocalTime(&st);
-		fprintf(f, "[%02d:%02d:%02d.%03d] ", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds);
-		va_list ap;
-		va_start(ap, fmt);
-		vfprintf(f, fmt, ap);
-		va_end(ap);
-		fputc('\n', f);
-		fflush(f);
-	}
-	LeaveCriticalSection(&logCriticalSection);
 }
 
 /* ------------------------------------------------------------------ */
@@ -110,23 +106,27 @@ static bool WaitUnpacked()
 			LARGE_INTEGER t1;
 			QueryPerformanceCounter(&t1);
 			double dt = (double) (t1.QuadPart - t0.QuadPart) / frq.QuadPart;
-			mod::Log("unpackgate: UNPACKED after %.2fs -- runtime code bytes verified", dt);
+			mod::Log("unpackgate: UNPACKED after {:.2f}s -- runtime code bytes verified", dt);
 			return true;
 		}
 		if (i % 25 == 0 && logged++ < 10)
-			mod::Log("unpackgate: still packed (attempt %d) ...", i);
+			mod::Log("unpackgate: still packed (attempt {}) ...", i);
 		Sleep(200);
 	}
-	mod::Log("unpackgate: TIMEOUT -- bytes at +0x26cce0 = %02x %02x %02x .. %02x %02x %02x",
+	mod::Log("unpackgate: TIMEOUT -- bytes at +0x26cce0 = {:02X} {:02X} {:02X} .. {:02X} {:02X} {:02X}",
 	         p[0], p[1], p[2], p[17], p[18], p[19]);
 	return false;
 }
 
 void mod::Main()
 {
-	moduleBase = (uintptr_t) GetModuleHandleA(nullptr);
-
-	Log("session: ad2ui build %s %s | pid=%lu | module_base=%p", __DATE__, __TIME__, (unsigned long) GetCurrentProcessId(), (void*) mod::moduleBase);
+	if (!InitLog())
+	{
+		// TODO: Alert user to log file failing
+		return;
+	}
+	moduleBase = (uintptr_t)GetModuleHandleA(nullptr);
+	Log("session: ad2ui build {} {} | pid={} | module_base={}", __DATE__, __TIME__, GetCurrentProcessId(), reinterpret_cast<void*>(moduleBase));
 
 	/* versus level cache: the per-world .tmx inventory that drives the
 	   count override (active files per world). Plain file read -- needs
@@ -137,7 +137,7 @@ void mod::Main()
 		// TODO: Refactor to use NtQueryInformationProcess ?
 		
 		char* cl = GetCommandLineA();
-		Log("session: cmdline=%ls", cl);
+		Log("session: cmdline={}", cl);
 	}
 
 	/* wait until VMP has unpacked the image in place before trusting ANY
