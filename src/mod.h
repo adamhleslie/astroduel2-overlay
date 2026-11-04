@@ -11,6 +11,13 @@
 
 namespace mod
 {
+	/* Mod's Main function run on a thread spun up on DllMain. This is the entry point for:
+	 *   1. Setting up logging
+	 *   2. Waiting for VMP to unpack the executable in place
+	 *   3. Initializing the imgui overlay
+	 *   4. Installing hooks
+	 *   5. Running the overlay loop
+	 */
 	void Main();
 
 	// Main executable module (AstroDuel2.exe)

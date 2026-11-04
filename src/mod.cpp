@@ -1,18 +1,3 @@
-/* mod.cpp -- in-game ImGui overlay for Astro Duel 2 injected as proxy steam dll running on a thread spun up on DllMain:
- *   1. Waits for VMP to unpack the image in place
- *   2. Initializes the imgui overlay
- *   3. Installs hooks under, via hooks:: namespaces
- *   4. Runs the overlay loop
- *   All diagnostics -> %LOCALAPPDATA%\AstroDuel2Mod\probe_ui.log
- *
- *  VMP Unpack: the game ships VMP-packed, and loaded at import
- *   resolution (steam_api64 proxy) the stub has NOT run yet -- sections
- *   are still ciphertext. Because all 117 .tmx levels are preloaded in
- *   one ~450 ms block ~10 s after process start, the worker polls until
- *   the VMP stub has unpacked the image in place (verified by the
- *   20-byte prologue at RVA 0x26cce0) before patching anything. If the
- *   image is already unpacked, the gate passes on the first check.
- */
 #include "mod.h"
 
 #include <array>
