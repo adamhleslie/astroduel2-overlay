@@ -11,6 +11,8 @@
 
 namespace
 {
+	constexpr std::string module = "level-pool";
+
 	/* ------------------------------------------------------------------ */
 	/* versus level cache -- per-world .tmx inventory + the count source  */
 	/*                                                                     */
@@ -107,7 +109,7 @@ namespace
 		}
 		else
 		{
-			mod::Log("poolcache: {}: scan FAILED (err {})", dirA, GetLastError());
+			mod::Log(module, "{}: scan FAILED (err {})", dirA, GetLastError());
 			return;
 		}
 		std::sort(names.begin(), names.end(), PoolTmxBefore);
@@ -136,13 +138,10 @@ namespace
 		level_pool::poolWorlds.push_back(w);
 		if (w.id >= 1 && w.id < level_pool::poolWorldMax) level_pool::poolWorldById[w.id] = idx;
 		if (nonCg < 2)
-			mod::Log(
-				"poolcache ERROR: {}: only {} level(s) found (< 2) -- a pool of {} is below the walk's safe minimum (its exhaust path is an assert); {}",
-				dirName, nonCg, act,
-				act == 1 ? "count faked to 2 to survive (single-map mode)" : "CRASH/FREEZE expected in this world");
-		mod::Log("poolcache: {}: {} tmx, {} active (all on by default, cg_ skipped: {}){} -> count={}",
-		         dirName, (int) w.files.size(), act, cg,
-		         (w.id < 1) ? " [worldType unknown, not applied]" : "", act);
+			mod::Log(module, "poolcache ERROR: {}: only {} level(s) found (< 2) -- a pool of {} is below the walk's safe minimum (its exhaust path is an assert); {}",
+				dirName, nonCg, act, act == 1 ? "count faked to 2 to survive (single-map mode)" : "CRASH/FREEZE expected in this world");
+		mod::Log(module, "{}: {} tmx, {} active (all on by default, cg_ skipped: {}){} -> count={}",
+			dirName, (int) w.files.size(), act, cg, (w.id < 1) ? " [worldType unknown, not applied]" : "", act);
 	}
 
 	void PoolCacheBuild()
@@ -150,13 +149,13 @@ namespace
 		char base[MAX_PATH] = {0};
 		if (!GetModuleFileNameA(mod::dllModuleBase, base, MAX_PATH))
 		{
-			mod::Log("poolcache: GetModuleFileName FAILED");
+			mod::Log(module, "GetModuleFileName FAILED");
 			return;
 		}
 		char* slash = strrchr(base, '\\');
 		if (!slash)
 		{
-			mod::Log("poolcache: no dir in {}", base);
+			mod::Log(module, "no dir in {}", base);
 			return;
 		}
 		*slash = 0;
@@ -171,7 +170,7 @@ namespace
 		HANDLE h = FindFirstFileW(pat, &fd);
 		if (h == INVALID_HANDLE_VALUE)
 		{
-			mod::Log("poolcache: {} not found (err {}) -- all worlds stock", dir, GetLastError());
+			mod::Log(module, "{} not found (err {}) -- all worlds stock", dir, GetLastError());
 			return;
 		}
 		int worlds = 0;
@@ -193,7 +192,7 @@ namespace
 			}
 		} while (FindNextFileW(h, &fd));
 		FindClose(h);
-		mod::Log("poolcache: {} world dir(s) cached under {}", worlds, dir);
+		mod::Log(module, "{} world dir(s) cached under {}", worlds, dir);
 	}
 
 	/* ------------------------------------------------------------------ */
@@ -240,7 +239,7 @@ namespace
 			}
 		}
 		int count = PoolWorldAssignSlots(w);
-		mod::Log("poolui: APPLY {} -- count={} ({} flag change(s))", w.dir.c_str(), count, changed);
+		mod::Log(module, "APPLY {} -- count={} ({} flag change(s))", w.dir.c_str(), count, changed);
 	}
 
 	/* set every world's draft to a value (1=select all, 0=clear all) and apply
@@ -252,7 +251,7 @@ namespace
 			for (char& c: poolDraft[i]) c = (char) value;
 			PoolApplyWorld((int) i); /* copies draft -> live + recompacts slots */
 		}
-		mod::Log("poolui: {} all worlds -- count={} applied to every world",
+		mod::Log(module, "{} all worlds -- count={} applied to every world",
 		         value ? "RESET" : "CLEAR", value);
 	}
 }
@@ -293,7 +292,7 @@ void level_pool::DrawUi()
 		if (ImGui::Button("Open res folder"))
 		{
 			ShellExecuteA(NULL, "open", resDir, NULL, NULL, SW_SHOWNORMAL);
-			mod::Log("poolui: opened res folder {}", resDir);
+			mod::Log(module, "opened res folder {}", resDir);
 		}
 		ImGui::SameLine();
 		if (ImGui::Button("Reset All Worlds"))

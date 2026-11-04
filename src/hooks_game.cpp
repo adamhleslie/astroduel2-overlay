@@ -11,6 +11,9 @@
 
 namespace
 {
+	constexpr std::string worldDataModule = "get-world-data";
+	constexpr std::string levelModule = "get-level";
+
 	constexpr uintptr_t getWorldData = 0x2AE190;
 	constexpr uintptr_t getLevel = 0x26C1C0;
 
@@ -58,7 +61,7 @@ static void* GetWorldDataHook(void* out, int worldType)
 {
 	if (!getWorldDataOrig)
 	{
-		mod::Log("getWorldData: FATAL -- no trampoline; out buffer left zeroed");
+		mod::Log(worldDataModule, "FATAL -- no trampoline; out buffer left zeroed");
 		return out;
 	}
 	void* r = ((FnGetWorldData) getWorldDataOrig)(out, worldType);
@@ -66,7 +69,7 @@ static void* GetWorldDataHook(void* out, int worldType)
 	const int stock = f[3];
 	const int ov = level_pool::PoolWorldEffectiveCount(worldType);
 	if (ov) f[3] = ov;
-	mod::Log("getWorldData: world={}({}) out={} cnt={} (stock {}){} ra0={:#010X}",
+	mod::Log(worldDataModule, "world={}({}) out={} cnt={} (stock {}){} ra0={:#010X}",
 	         worldType, level_pool::PoolWorldName(worldType), r, f[3], stock,
 	         ov ? " OVERRIDDEN" : "",(uint32_t) ((uintptr_t) _ReturnAddress() - mod::ad2ModuleBase));
 	return r;
@@ -76,13 +79,13 @@ bool hooks::game::InstallGetWorldDataHook()
 {
 	if (MH_Initialize() != MH_OK)
 	{
-		mod::Log("getWorldData: MH_Initialize FAILED");
+		mod::Log(worldDataModule, "MH_Initialize FAILED");
 		return false;
 	}
 	void* target = GetPointerFromAnchor(mod::ad2ModuleBase, getWorldData);
 	if (MH_CreateHook(target, reinterpret_cast<void*>(GetWorldDataHook), &getWorldDataOrig) != MH_OK)
 	{
-		mod::Log("getWorldData: MH_CreateHook FAILED -- REFUSED, stock behavior");
+		mod::Log(worldDataModule, "MH_CreateHook FAILED -- REFUSED, stock behavior");
 		return false;
 	}
 	/* EnableHookLL freezes all threads once while it writes the entry; do
@@ -90,12 +93,12 @@ bool hooks::game::InstallGetWorldDataHook()
 	   ~t+9s preload block that first fires worldDataForType. */
 	if (MH_EnableHook(target) != MH_OK)
 	{
-		mod::Log("getWorldData: MH_EnableHook FAILED -- MH_RemoveHook, stock behavior");
+		mod::Log(worldDataModule, "MH_EnableHook FAILED -- MH_RemoveHook, stock behavior");
 		MH_RemoveHook(target);
 		return false;
 	}
 	getWorldDataState = 1;
-	mod::Log("getWorldData: INSTALLED target={} trampoline={}", target, getWorldDataOrig);
+	mod::Log(worldDataModule, "INSTALLED target={} trampoline={}", target, getWorldDataOrig);
 	return true;
 }
 
@@ -107,7 +110,7 @@ bool hooks::game::InstallGetWorldDataHook()
 //     if (InterlockedCompareExchange(&getWorldDataState, 0, 0) == 1) {
 //         uint8_t* p = (uint8_t*)(ad2mod::g_module_base + 0x2AE190);
 //         if (p[0] != 0xE9 && getWorldDataRevertLogged++ < 3)
-//             ad2mod::log("getWorldData: entry REVERTED (bytes %02x %02x %02x %02x) -- VMP? hook disengaged, stock behavior",
+//             ad2mod::Log(worldDataModule, "entry REVERTED (bytes %02x %02x %02x %02x) -- VMP? hook disengaged, stock behavior",
 //                 p[0], p[1], p[2], p[3]);
 //     }
 //     if (InterlockedCompareExchange(&getLevelState, 0, 0) == 1) {
@@ -257,7 +260,7 @@ static void GetLevelRemap(void* out, int world, int num, int pick, int mode)
 		if (PoolRandPick(level_pool::randMode, world, &rpath))
 		{
 			reinterpret_cast<std::string*>(out)->assign(rpath);
-			mod::Log("getLevel RAND: mode={} world={}({}) num={} -> {}", static_cast<int>(level_pool::randMode), world, level_pool::PoolWorldName(world), num, rpath);
+			mod::Log(levelModule, "RAND mode={} world={}({}) num={} -> {}", static_cast<int>(level_pool::randMode), world, level_pool::PoolWorldName(world), num, rpath);
 			return;
 		}
 	}
@@ -285,7 +288,7 @@ static void GetLevelRemap(void* out, int world, int num, int pick, int mode)
 	}
 	if (!pf)
 	{
-		mod::Log("getLevel REMAP MISS: world={}({}) num={} -- no slot (outside active pool)", world, level_pool::PoolWorldName(world), num);
+		mod::Log(levelModule, "REMAP MISS - world={}({}) num={} - no slot (outside active pool)", world, level_pool::PoolWorldName(world), num);
 		return;
 	}
 	char ident[48];
@@ -294,7 +297,7 @@ static void GetLevelRemap(void* out, int world, int num, int pick, int mode)
 	char np[192];
 	snprintf(np, sizeof np, "levels/versus/%s/%s", w.dir.c_str(), pf->name.c_str());
 	reinterpret_cast<std::string*>(out)->assign(np, strlen(np));
-	mod::Log("getLevel REMAP: world={}({}) slot={} {} -> {}", world, level_pool::PoolWorldName(world), num, ident, pf->name.c_str());
+	mod::Log(levelModule, "REMAP - world={}({}) slot={} {} -> {}", world, level_pool::PoolWorldName(world), num, ident, pf->name.c_str());
 }
 
 static void* GetLevelHook(void* out, int world, int num, char mode)
@@ -302,7 +305,7 @@ static void* GetLevelHook(void* out, int world, int num, char mode)
 	void* ret = getLevelOrig ? ((FnGetLevel) getLevelOrig)(out, world, num, mode) : nullptr;
 	if (!getLevelOrig)
 	{
-		mod::Log("getLevel: FATAL -- no trampoline; composer NOT run");
+		mod::Log(levelModule, "FATAL - no trampoline; composer NOT run");
 		return ret;
 	}
 	/* probe: pick context FUN_14026B9C0 refreshes before the chain. */
@@ -320,7 +323,7 @@ static void* GetLevelHook(void* out, int world, int num, char mode)
 	GetLevelRemap(out, world, num, pick, mode); /* slot -> file (stage 2); logs on rewrite/miss */
 	char path[160];
 	PeekStdString(out, path, sizeof(path)); /* post-rewrite: the final path */
-	mod::Log("getLevel: world={}({}) num={} mode={} pick={} spec={} cnt={} path=\"{}\" ret={} ra0={:#010X}",
+	mod::Log(levelModule, "world={}({}) num={} mode={} pick={} spec={} cnt={} path=\"{}\" ret={} ra0={:#010X}",
 	         world, level_pool::PoolWorldName(world), num, (int) mode, pick, spec, cnt, path, ret,
 	         (uint32_t) ((uintptr_t) _ReturnAddress() - mod::ad2ModuleBase));
 	return ret;
@@ -331,16 +334,16 @@ bool hooks::game::InstallGetLevelHook()
 	void* target = GetPointerFromAnchor(mod::ad2ModuleBase, getLevel);
 	if (MH_CreateHook(target, reinterpret_cast<void*>(GetLevelHook), &getLevelOrig) != MH_OK)
 	{
-		mod::Log("getLevel: MH_CreateHook FAILED -- REFUSED, stock behavior");
+		mod::Log(levelModule, "MH_CreateHook FAILED -- REFUSED, stock behavior");
 		return false;
 	}
 	if (MH_EnableHook(target) != MH_OK)
 	{
-		mod::Log("getLevel: MH_EnableHook FAILED -- MH_RemoveHook, stock behavior");
+		mod::Log(levelModule, "MH_EnableHook FAILED -- MH_RemoveHook, stock behavior");
 		MH_RemoveHook(target);
 		return false;
 	}
 	getLevelState = 1;
-	mod::Log("getLevel: INSTALLED target={} trampoline={}", target, getLevelOrig);
+	mod::Log(levelModule, "INSTALLED target={} trampoline={}", target, getLevelOrig);
 	return true;
 }

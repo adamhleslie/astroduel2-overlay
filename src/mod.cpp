@@ -22,6 +22,9 @@ std::ofstream mod::internal::logFileStream;
 
 namespace
 {
+	constexpr std::string module = "session";
+	constexpr std::string unpackModule = "unpack-gate";
+	
 	// When DLL loaded, the VMP stub has NOT run yet and not unpacked the game's executable yet.
 	// Poll until the unpacked image is verifiable, checking the 20-byte shadow-register-store prologue.
 	constexpr uintptr_t unpackPrologueOffset = 0x26cce0;
@@ -51,17 +54,17 @@ namespace
 		{
 			if (memcmp(prologue, unpackedPrologue.data(), unpackedPrologue.size()) == 0)
 			{
-				mod::Log("unpack-gate: Unpacked after {:.2f}s", getDuration());
+				mod::Log(unpackModule, "Unpacked after {:.2f}s", getDuration());
 				return true;
 			}
 			if ((i % unpackLogModulo == 0) && (++logCount <= unpackMaxLogCount))
 			{
-				mod::Log("unpack-gate: Still packed after {:.2f}s ...", getDuration());
+				mod::Log(unpackModule, "Still packed after {:.2f}s ...", getDuration());
 			}
 			Sleep(unpackTestDelayMs);
 		}
 
-		mod::Log("unpack-gate: TIMEOUT after {} - packed bytes at +0x26cce0: {:02X} {:02X} {:02X} .. {:02X} {:02X} {:02X}", getDuration(), prologue[0], prologue[1], prologue[2], prologue[17], prologue[18], prologue[19]);
+		mod::Log(unpackModule, "TIMEOUT after {} - packed bytes at +0x26cce0: {:02X} {:02X} {:02X} .. {:02X} {:02X} {:02X}", getDuration(), prologue[0], prologue[1], prologue[2], prologue[17], prologue[18], prologue[19]);
 		return false;
 	}
 
@@ -114,7 +117,7 @@ void mod::Main()
 	}
 
 	ad2ModuleBase = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
-	Log("session: build {} {} | pid={} | dllModuleBase={} ad2ModuleBase={}", __DATE__, __TIME__, GetCurrentProcessId(), reinterpret_cast<void*>(dllModuleBase), reinterpret_cast<void*>(ad2ModuleBase));
+	Log(module, "build {} {} | pid={} | dllModuleBase={} ad2ModuleBase={}", __DATE__, __TIME__, GetCurrentProcessId(), reinterpret_cast<void*>(dllModuleBase), reinterpret_cast<void*>(ad2ModuleBase));
 
 	// Read files from disk to build our level pool asap, since we are in a race condition against the game thread's unpack + file loading
 	level_pool::Init();
@@ -122,14 +125,14 @@ void mod::Main()
 	// Wait until VMP has unpacked the image in place
 	if (!WaitForUnpack())
 	{
-		Log("session: ABORTING - game not unpacked");
+		Log(module, "ABORTING - game not unpacked");
 		return;
 	}
 
 	// Initialize the overlay
 	if (!overlay::Init())
 	{
-		Log("session: ABORTING - overlay not initialized");
+		Log(module, "ABORTING - overlay not initialized");
 		return;
 	}
 
