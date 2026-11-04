@@ -68,7 +68,7 @@ static void* GetWorldDataHook(void* out, int worldType)
 	if (ov) f[3] = ov;
 	mod::Log("getWorldData: world={}({}) out={} cnt={} (stock {}){} ra0={:#010X}",
 	         worldType, level_pool::PoolWorldName(worldType), r, f[3], stock,
-	         ov ? " OVERRIDDEN" : "",(uint32_t) ((uintptr_t) _ReturnAddress() - mod::moduleBase));
+	         ov ? " OVERRIDDEN" : "",(uint32_t) ((uintptr_t) _ReturnAddress() - mod::ad2ModuleBase));
 	return r;
 }
 
@@ -79,7 +79,7 @@ bool hooks::game::InstallGetWorldDataHook()
 		mod::Log("getWorldData: MH_Initialize FAILED");
 		return false;
 	}
-	void* target = GetPointerFromAnchor(mod::moduleBase, getWorldData);
+	void* target = GetPointerFromAnchor(mod::ad2ModuleBase, getWorldData);
 	if (MH_CreateHook(target, reinterpret_cast<void*>(GetWorldDataHook), &getWorldDataOrig) != MH_OK)
 	{
 		mod::Log("getWorldData: MH_CreateHook FAILED -- REFUSED, stock behavior");
@@ -306,7 +306,7 @@ static void* GetLevelHook(void* out, int world, int num, char mode)
 		return ret;
 	}
 	/* probe: pick context FUN_14026B9C0 refreshes before the chain. */
-	uintptr_t b = mod::moduleBase;
+	uintptr_t b = mod::ad2ModuleBase;
 	int pick = *(volatile int32_t*) (b + 0x5B9FF0); /* DAT_1405b9ff0 */
 	int cnt = *(volatile int32_t*) (b + 0x5DE56C); /* DAT_1405de56c (d3) */
 	int spec = -1;
@@ -322,13 +322,13 @@ static void* GetLevelHook(void* out, int world, int num, char mode)
 	PeekStdString(out, path, sizeof(path)); /* post-rewrite: the final path */
 	mod::Log("getLevel: world={}({}) num={} mode={} pick={} spec={} cnt={} path=\"{}\" ret={} ra0={:#010X}",
 	         world, level_pool::PoolWorldName(world), num, (int) mode, pick, spec, cnt, path, ret,
-	         (uint32_t) ((uintptr_t) _ReturnAddress() - mod::moduleBase));
+	         (uint32_t) ((uintptr_t) _ReturnAddress() - mod::ad2ModuleBase));
 	return ret;
 }
 
 bool hooks::game::InstallGetLevelHook()
 {
-	void* target = GetPointerFromAnchor(mod::moduleBase, getLevel);
+	void* target = GetPointerFromAnchor(mod::ad2ModuleBase, getLevel);
 	if (MH_CreateHook(target, reinterpret_cast<void*>(GetLevelHook), &getLevelOrig) != MH_OK)
 	{
 		mod::Log("getLevel: MH_CreateHook FAILED -- REFUSED, stock behavior");

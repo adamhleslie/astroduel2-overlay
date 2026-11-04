@@ -148,7 +148,7 @@ namespace
 	void PoolCacheBuild()
 	{
 		char base[MAX_PATH] = {0};
-		if (!GetModuleFileNameA(mod::dllInstance, base, MAX_PATH))
+		if (!GetModuleFileNameA(mod::dllModuleBase, base, MAX_PATH))
 		{
 			mod::Log("poolcache: GetModuleFileName FAILED");
 			return;

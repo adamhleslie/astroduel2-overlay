@@ -309,7 +309,7 @@ bool overlay::Init()
 		s3 = GetModuleHandleA("SDL3.dll");
 		if (!s3) Sleep(200);
 	}
-	mod::Log("worker: module_base={} SDL3.dll={}", (void*) mod::moduleBase, (void*) s3);
+	mod::Log("worker: module_base={} SDL3.dll={}", (void*) mod::ad2ModuleBase, (void*) s3);
 	if (!s3)
 	{
 		mod::Log("worker: SDL3.dll NOT loaded after 90s -- giving up");
@@ -338,8 +338,8 @@ bool overlay::Init()
 	uintptr_t* slot = nullptr;
 	for (int attempt = 0; attempt < 100 && !slot; attempt++)
 	{
-		uintptr_t* begin = (uintptr_t*) (mod::moduleBase + 0x47e028);
-		uintptr_t* end = (uintptr_t*) (mod::moduleBase + 0x47eba0);
+		uintptr_t* begin = (uintptr_t*) (mod::ad2ModuleBase + 0x47e028);
+		uintptr_t* end = (uintptr_t*) (mod::ad2ModuleBase + 0x47eba0);
 		for (uintptr_t* it = begin; it < end; it++)
 		{
 			if (*it == real)

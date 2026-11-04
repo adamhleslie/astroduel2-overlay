@@ -81,7 +81,7 @@ namespace
 		// Scan the whole IAT region
 		for (uintptr_t slotOffset = iatRegionStart; slotOffset < iatRegionEnd; slotOffset += 8)
 		{
-			uintptr_t* slotAddress = reinterpret_cast<uintptr_t*>(mod::moduleBase + slotOffset);
+			uintptr_t* slotAddress = reinterpret_cast<uintptr_t*>(mod::ad2ModuleBase + slotOffset);
 			if (*slotAddress == address)
 			{
 				DWORD newProtect = PAGE_READWRITE;

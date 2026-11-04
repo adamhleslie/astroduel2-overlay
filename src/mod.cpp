@@ -15,6 +15,7 @@
  */
 #include "mod.h"
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -28,8 +29,9 @@
 #include "level_pool.h"
 #include "overlay.h"
 
-uintptr_t mod::moduleBase = 0;
-HINSTANCE mod::dllInstance = nullptr;
+// extern globals
+uintptr_t mod::ad2ModuleBase = 0;
+HINSTANCE mod::dllModuleBase = nullptr;
 std::mutex mod::internal::logMutex;
 std::ofstream mod::internal::logFileStream;
 
@@ -37,6 +39,7 @@ namespace
 {
 	bool InitLog()
 	{
+		// Construct the path to the log file
 		std::filesystem::path logFilePath;
 		{
 			// Get the local app data path on windows, which our log file is relative to
@@ -72,97 +75,86 @@ namespace
 		mod::internal::logFileStream.open(logFilePath, std::ofstream::out | std::ofstream::app);
 		return mod::internal::logFileStream.is_open();
 	}
-}
 
-/* ------------------------------------------------------------------ */
-/* worker: locate IAT slot, patch, poll hotkey                         */
-/* ------------------------------------------------------------------ */
-
-/* UNPACK GATE ------------------------------------------------------- */
-/* Loaded at import resolution (steam_api64 proxy), the VMP stub has
-   NOT run yet: the game's sections are still ciphertext, so every
-   runtime-byte check (prologues, IAT slot contents) sees the packed
-   image. Poll until the unpacked image is verifiable -- we use the
-   20-byte shadow-register-store prologue at RVA 0x26cce0
-   (capstone-verified against the unpacked PE). If the image is
-   already unpacked, the gate passes on the first check. */
-static bool WaitUnpacked()
-{
-	const BYTE want[20] = {
+	// When DLL loaded, the VMP stub has NOT run yet and not unpacked the game's executable yet.
+	// Poll until the unpacked image is verifiable, checking the 20-byte shadow-register-store prologue.
+	constexpr uintptr_t unpackPrologueOffset = 0x26cce0;
+	constexpr std::array<uint8_t, 20> unpackedPrologue =
+	{
 		0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10,
 		0x48, 0x89, 0x74, 0x24, 0x18, 0x48, 0x89, 0x7C, 0x24, 0x20
 	};
-	const uint8_t* p = (const uint8_t*) (mod::moduleBase + 0x26cce0);
-	LARGE_INTEGER t0;
-	QueryPerformanceCounter(&t0);
-	LARGE_INTEGER frq;
-	QueryPerformanceFrequency(&frq);
-	int logged = 0;
-	for (int i = 0; i < 450; i++)
+
+	constexpr int unpackTestIterations = 450;
+	constexpr int unpackTestDelayMs = 45;
+	constexpr int unpackMaxLogCount = 10;
+	constexpr int unpackLogModulo = 5;
+
+	bool WaitForUnpack()
 	{
-		/* 450 * 200 ms = 90 s */
-		if (memcmp(p, want, 20) == 0)
+		const uint8_t* prologue = reinterpret_cast<const uint8_t*>(mod::ad2ModuleBase + unpackPrologueOffset);
+		std::chrono::high_resolution_clock::time_point tStart = std::chrono::high_resolution_clock::now();
+		auto getDuration = [tStart]
 		{
-			LARGE_INTEGER t1;
-			QueryPerformanceCounter(&t1);
-			double dt = (double) (t1.QuadPart - t0.QuadPart) / frq.QuadPart;
-			mod::Log("unpackgate: UNPACKED after {:.2f}s -- runtime code bytes verified", dt);
-			return true;
+			std::chrono::high_resolution_clock::time_point tEnd = std::chrono::high_resolution_clock::now();
+			return std::chrono::duration_cast<std::chrono::duration<double>>(tEnd - tStart).count();
+		};
+
+		int logCount = 0;
+		for (int i = 0; i < unpackTestIterations; ++i)
+		{
+			if (memcmp(prologue, unpackedPrologue.data(), unpackedPrologue.size()) == 0)
+			{
+				mod::Log("unpack-gate: Unpacked after {:.2f}s", getDuration());
+				return true;
+			}
+			if ((i % unpackLogModulo == 0) && (++logCount <= unpackMaxLogCount))
+			{
+				mod::Log("unpack-gate: Still packed after {:.2f}s ...", getDuration());
+			}
+			Sleep(unpackTestDelayMs);
 		}
-		if (i % 25 == 0 && logged++ < 10)
-			mod::Log("unpackgate: still packed (attempt {}) ...", i);
-		Sleep(200);
+
+		mod::Log("unpack-gate: TIMEOUT after {} - packed bytes at +0x26cce0: {:02X} {:02X} {:02X} .. {:02X} {:02X} {:02X}", getDuration(), prologue[0], prologue[1], prologue[2], prologue[17], prologue[18], prologue[19]);
+		return false;
 	}
-	mod::Log("unpackgate: TIMEOUT -- bytes at +0x26cce0 = {:02X} {:02X} {:02X} .. {:02X} {:02X} {:02X}",
-	         p[0], p[1], p[2], p[17], p[18], p[19]);
-	return false;
 }
 
 void mod::Main()
 {
 	if (!InitLog())
 	{
-		// TODO: Alert user to log file failing
+		// TODO: Alert user without log
 		return;
 	}
-	moduleBase = (uintptr_t)GetModuleHandleA(nullptr);
-	Log("session: ad2ui build {} {} | pid={} | module_base={}", __DATE__, __TIME__, GetCurrentProcessId(), reinterpret_cast<void*>(moduleBase));
 
-	/* versus level cache: the per-world .tmx inventory that drives the
-	   count override (active files per world). Plain file read -- needs
-	   no unpacking; built before the hooks install so the summary is in
-	   the log before the first getWorldData call. */
+	ad2ModuleBase = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
+	Log("session: build {} {} | pid={} | dllModuleBase={} ad2ModuleBase={}", __DATE__, __TIME__, GetCurrentProcessId(), reinterpret_cast<void*>(dllModuleBase), reinterpret_cast<void*>(ad2ModuleBase));
+
+	// Read files from disk to build our level pool asap, since we are in a race condition against the game thread's unpack + file loading
 	level_pool::Init();
-	{
-		// TODO: Refactor to use NtQueryInformationProcess ?
-		
-		char* cl = GetCommandLineA();
-		Log("session: cmdline={}", cl);
-	}
 
-	/* wait until VMP has unpacked the image in place before trusting ANY
-	   runtime bytes (IAT slot scan, patches). */
-	if (!WaitUnpacked())
+	// Wait until VMP has unpacked the image in place
+	if (!WaitForUnpack())
 	{
-		Log("worker: ABORTING -- game not unpacked, refusing to patch packed bytes");
+		Log("session: ABORTING - game not unpacked");
 		return;
 	}
 
-	if (!overlay::Init()) { return; }
+	// Initialize the overlay
+	if (!overlay::Init())
+	{
+		Log("session: ABORTING - overlay not initialized");
+		return;
+	}
 
-	/* file-API IAT hooks: runtime path log (match-start diagnostics) */
+	// Install Import Address Table hooks
 	hooks::iat::InstallHooks();
 
-	/* hook on worldDataForType (defer-and-patch count). Installed after
-	   the IAT hooks (render path stable) and before the ~t+9s preload
-	   block that first fires it. */
+	// Install game hooks
 	hooks::game::InstallGetWorldDataHook();
-
-	/* level-string composer hook: identifies which call site fired
-	   (ra0), applies the slot -> file remap (stage 2), logs the final
-	   path and the pick context (pick/spec/cnt). Installed after
-	   PoolCacheBuild/PoolDraftInit so the cache is ready on first fire. */
 	hooks::game::InstallGetLevelHook();
 
+	// Run the overlay loop
 	overlay::Loop();
 }

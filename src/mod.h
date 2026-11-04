@@ -14,10 +14,10 @@ namespace mod
 	void Main();
 
 	// Main executable module (AstroDuel2.exe)
-	extern uintptr_t moduleBase;
+	extern uintptr_t ad2ModuleBase;
 
 	// Our DLL module
-	extern HINSTANCE dllInstance;
+	extern HINSTANCE dllModuleBase;
 
 	// Log file constants - will be located under the Windows Folder specified by logFileFolderId, at the relative path provided by logFile
 	const KNOWNFOLDERID logFileFolderId = FOLDERID_LocalAppData;
