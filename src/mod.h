@@ -24,9 +24,12 @@ namespace mod
 	extern uintptr_t ad2ModuleBase;
 
 	// Our DLL module
-	extern HINSTANCE dllModuleBase;
+	extern HINSTANCE dllModule;
 
-	// Log file constants - will be located under the Windows Folder specified by logFileFolderId, at the relative path provided by logFile
+	// The game's resources directory ("Astro Duel 2/res")
+	extern std::filesystem::path resourcesPath;
+
+	// Log file constants - file will be located under the Windows Folder specified by logFileFolderId, at the relative path provided by logFile
 	const KNOWNFOLDERID logFileFolderId = FOLDERID_LocalAppData;
 	const std::wstring logFile = LR"(AstroDuel2\overlay.log)";
 

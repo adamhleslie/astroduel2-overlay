@@ -24,7 +24,7 @@ int WINAPI DllMain(HINSTANCE hinstDll, DWORD fdwReason, LPVOID)
 {
 	if (fdwReason == DLL_PROCESS_ATTACH)
 	{
-		mod::dllModuleBase = hinstDll;
+		mod::dllModule = hinstDll;
 		HANDLE hThread = reinterpret_cast<HANDLE>(_beginthreadex(nullptr, 0, &SimpleStartupWorker, nullptr, 0, nullptr));
 		if (hThread)
 		{

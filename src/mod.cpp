@@ -16,7 +16,9 @@
 
 // extern globals
 uintptr_t mod::ad2ModuleBase = 0;
-HINSTANCE mod::dllModuleBase = nullptr;
+HINSTANCE mod::dllModule = nullptr;
+std::filesystem::path mod::resourcesPath;
+
 std::mutex mod::internal::logMutex;
 std::ofstream mod::internal::logFileStream;
 
@@ -42,10 +44,10 @@ namespace
 	bool WaitForUnpack()
 	{
 		const uint8_t* prologue = reinterpret_cast<const uint8_t*>(mod::ad2ModuleBase + unpackPrologueOffset);
-		std::chrono::high_resolution_clock::time_point tStart = std::chrono::high_resolution_clock::now();
+		auto tStart = std::chrono::high_resolution_clock::now();
 		auto getDuration = [tStart]
 		{
-			std::chrono::high_resolution_clock::time_point tEnd = std::chrono::high_resolution_clock::now();
+			auto tEnd = std::chrono::high_resolution_clock::now();
 			return std::chrono::duration_cast<std::chrono::duration<double>>(tEnd - tStart).count();
 		};
 
@@ -116,8 +118,29 @@ void mod::Main()
 		return;
 	}
 
-	ad2ModuleBase = reinterpret_cast<uintptr_t>(GetModuleHandleA(nullptr));
-	Log(module, "build {} {} | pid={} | dllModuleBase={} ad2ModuleBase={}", __DATE__, __TIME__, GetCurrentProcessId(), reinterpret_cast<void*>(dllModuleBase), reinterpret_cast<void*>(ad2ModuleBase));
+	HMODULE ad2Module = GetModuleHandleA(nullptr);
+	ad2ModuleBase = reinterpret_cast<uintptr_t>(ad2Module);
+
+	// Cache the location of the resources directory
+	char ad2ModulePathString[MAX_PATH] = {};
+	if (GetModuleFileNameA(ad2Module, ad2ModulePathString, MAX_PATH))
+	{
+		std::filesystem::path ad2ModulePath = ad2ModulePathString;
+		if (ad2ModulePath.has_parent_path())
+		{
+			resourcesPath = ad2ModulePath.parent_path().append("res");
+		}
+		else
+		{
+			Log(module, "No parent path for ad2Module {}", ad2ModulePathString);
+		}
+	}
+	else
+	{
+		Log(module, "GetModuleFileName for ad2Module FAILED");
+	}
+
+	Log(module, "build {} {} | pid={} | dllModuleBase={} ad2ModuleBase={}", __DATE__, __TIME__, GetCurrentProcessId(), reinterpret_cast<void*>(dllModule), reinterpret_cast<void*>(ad2ModuleBase));
 
 	// Read files from disk to build our level pool asap, since we are in a race condition against the game thread's unpack + file loading
 	level_pool::Init();

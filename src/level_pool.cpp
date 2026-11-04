@@ -1,13 +1,14 @@
 #include "level_pool.h"
 
 #include "mod.h"
+#include "imgui.h"
 
+#include <cassert>
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <filesystem>
 #include <shellapi.h>
-
-#include "imgui.h"
 
 namespace
 {
@@ -39,167 +40,177 @@ namespace
 	/* cache entry (or no active files) runs stock.                       */
 	/* for active-flag persistence (a future UI step) -- not read here.   */
 	/* ------------------------------------------------------------------ */
-	char resDir[MAX_PATH] = {0}; /* <gamedir>\res -- explorer button target (set in PoolCacheBuild) */
 
-	/* trailing number of a tmx name ("mines12.tmx" -> 12); -1 when none */
-	int PoolTmxNumber(const std::string& n)
+	// Updates level slots within the provided world based on their active state
+	// Returns the number of slots taken up, which is equivalent to the number of active levels
+	int AssignSlots(level_pool::World& world)
 	{
-		std::string b = n;
-		size_t dot = b.rfind('.');
-		if (dot != std::string::npos) b.erase(dot);
-		size_t i = b.size();
-		while (i > 0 && b[i - 1] >= '0' && b[i - 1] <= '9') i--;
-		if (i == b.size()) return -1;
-		int num = 0;
-		for (size_t k = i; k < b.size(); k++) num = num * 10 + (b[k] - '0');
-		return num;
+		int slotCount = 0;
+		for (level_pool::Level& level: world.levels)
+		{
+			level.slot = level.active ? ++slotCount : 0;
+		}
+
+		return slotCount;
 	}
 
-	/* natural order: numbered by ascending number, non-numbered last */
-	bool PoolTmxBefore(const std::string& a, const std::string& b)
+	bool EqualsCaseInsensitive(const std::string& a, const std::string& b)
 	{
-		int na = PoolTmxNumber(a), nb = PoolTmxNumber(b);
+		return std::ranges::equal(a, b,
+			[](char c1, char c2)
+			{
+				return std::tolower(static_cast<unsigned char>(c1)) == std::tolower(static_cast<unsigned char>(c2));
+			});
+	}
+
+	// Extracts the trailing number of a map filename for the specified world ("mines12.tmx" -> 12), -1 if none
+	int ExtractTmxNumber(const std::string& worldName, const std::string& filename)
+	{
+		size_t stemEnd = filename.rfind('.');
+		if (stemEnd == std::string::npos)
+		{
+			stemEnd = filename.size();
+		}
+
+		size_t i = stemEnd;
+		while ((i > 0) && std::isdigit(filename[i - 1]))
+		{
+			--i;
+		}
+
+		if (i == stemEnd)
+		{
+			// No number at end of stem
+			return -1;
+		}
+
+		if (!EqualsCaseInsensitive(worldName, filename.substr(0, i)))
+		{
+			// Stem before number doesn't match world name
+			return -1;
+		}
+
+		std::string substr = filename.substr(i, stemEnd - i);
+		int value = std::stoi(substr);
+		return value;
+	}
+
+	// Prioritizes map names in the form of "<worldName><#>.tmx", comparing their #. Otherwise direct string comparison.
+	bool MapFilenameComparator(const std::string& worldName, const std::string& a, const std::string& b)
+	{
+		int na = ExtractTmxNumber(worldName, a);
+		int nb = ExtractTmxNumber(worldName, b);
 		if ((na < 0) != (nb < 0)) return na >= 0;
 		if (na != nb) return na < nb;
 		return a < b;
 	}
 
-	/* compact slots 1..K over the active files (already sort-ordered); returns K */
-	int PoolWorldAssignSlots(level_pool::PoolWorld& w)
+	// Scan the provided world directory into the pool
+	void AddWorld(const std::filesystem::path& worldPath)
 	{
-		int slot = 0;
-		for (level_pool::PoolFile& pf: w.files)
-			pf.slot = pf.active ? ++slot : 0; /* inactive must lose any stale slot */
-		return slot;
-	}
+		assert(std::filesystem::is_directory(worldPath) && worldPath.has_filename());
 
-	/* count of active files in a worldType's cache entry; 0 = no entry (stock) */
-	int PoolActiveCount(int worldType)
-	{
-		if (worldType < 1 || worldType >= level_pool::poolWorldMax) return 0;
-		int idx = level_pool::poolWorldById[worldType];
-		if (idx < 0) return 0;
-		int n = 0;
-		for (const level_pool::PoolFile& f: level_pool::poolWorlds[idx].files)
-			if (f.active) n++;
-		return n;
-	}
-
-	/* scan one world dir (<base>\\res\\levels\\versus\\<dir>) into the cache */
-	void PoolWorldScan(const char* dirA, const char* dirName)
-	{
-		wchar_t pat[MAX_PATH + 16];
-		if (!MultiByteToWideChar(CP_ACP, 0, dirA, -1, pat, MAX_PATH + 16)) return;
-		wcscat(pat, L"\\*.tmx");
-		std::vector<std::string> names;
-		WIN32_FIND_DATAW fd;
-		HANDLE h = FindFirstFileW(pat, &fd);
-		if (h != INVALID_HANDLE_VALUE)
+		// Collect map files under the world directory
+		int cashGrabLevels = 0;
+		std::vector<std::string> mapFiles;
+		for (auto& directoryEntry : std::filesystem::directory_iterator(worldPath, std::filesystem::directory_options::skip_permission_denied))
 		{
-			do
+			if (!directoryEntry.is_regular_file())
 			{
-				if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
-				{
-					char an[260];
-					if (WideCharToMultiByte(CP_ACP, 0, fd.cFileName, -1, an, 260, nullptr, nullptr))
-						names.push_back(an);
-				}
-			} while (FindNextFileW(h, &fd));
-			FindClose(h);
-		}
-		else
-		{
-			mod::Log(module, "{}: scan FAILED (err {})", dirA, GetLastError());
-			return;
-		}
-		std::sort(names.begin(), names.end(), PoolTmxBefore);
-
-		level_pool::PoolWorld w;
-		w.id = level_pool::PoolWorldId(dirName); /* 0 = not in the worldType enum */
-		w.dir = dirName;
-		int cg = 0, nonCg = 0;
-		for (const std::string& nm: names)
-		{
-			if (nm.rfind("cg_", 0) == 0)
-			{
-				cg++;
 				continue;
-			} /* cash grab: not pooled at all */
-			level_pool::PoolFile pf;
-			pf.name = nm;
-			pf.path = std::string("levels/versus/") + dirName + "/" + nm; /* res-relative */
-			nonCg++;
-			pf.active = true; /* default: everything on */
-			pf.slot = 0; /* assigned below */
-			w.files.push_back(pf);
-		}
-		int act = PoolWorldAssignSlots(w);
-		int idx = (int) level_pool::poolWorlds.size();
-		level_pool::poolWorlds.push_back(w);
-		if (w.id >= 1 && w.id < level_pool::poolWorldMax) level_pool::poolWorldById[w.id] = idx;
-		if (nonCg < 2)
-			mod::Log(module, "poolcache ERROR: {}: only {} level(s) found (< 2) -- a pool of {} is below the walk's safe minimum (its exhaust path is an assert); {}",
-				dirName, nonCg, act, act == 1 ? "count faked to 2 to survive (single-map mode)" : "CRASH/FREEZE expected in this world");
-		mod::Log(module, "{}: {} tmx, {} active (all on by default, cg_ skipped: {}){} -> count={}",
-			dirName, (int) w.files.size(), act, cg, (w.id < 1) ? " [worldType unknown, not applied]" : "", act);
-	}
-
-	void PoolCacheBuild()
-	{
-		char base[MAX_PATH] = {0};
-		if (!GetModuleFileNameA(mod::dllModuleBase, base, MAX_PATH))
-		{
-			mod::Log(module, "GetModuleFileName FAILED");
-			return;
-		}
-		char* slash = strrchr(base, '\\');
-		if (!slash)
-		{
-			mod::Log(module, "no dir in {}", base);
-			return;
-		}
-		*slash = 0;
-		char dir[MAX_PATH + 32];
-		snprintf(dir, sizeof dir, "%s\\res\\levels\\versus", base);
-		snprintf(resDir, sizeof resDir, "%s\\res", base);
-
-		wchar_t pat[MAX_PATH + 32];
-		if (!MultiByteToWideChar(CP_ACP, 0, dir, -1, pat, MAX_PATH + 32)) return;
-		wcscat(pat, L"\\*");
-		WIN32_FIND_DATAW fd;
-		HANDLE h = FindFirstFileW(pat, &fd);
-		if (h == INVALID_HANDLE_VALUE)
-		{
-			mod::Log(module, "{} not found (err {}) -- all worlds stock", dir, GetLastError());
-			return;
-		}
-		int worlds = 0;
-		do
-		{
-			if (fd.cFileName[0] == L'.' && (fd.cFileName[1] == L'\0' || (
-				                                fd.cFileName[1] == L'.' && fd.cFileName[2] == L'\0')))
-				continue;
-			if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-			{
-				char an[MAX_PATH];
-				if (WideCharToMultiByte(CP_ACP, 0, fd.cFileName, -1, an, MAX_PATH, nullptr, nullptr))
-				{
-					char wdir[MAX_PATH + 64];
-					snprintf(wdir, sizeof wdir, "%s\\%s", dir, an);
-					PoolWorldScan(wdir, an);
-					worlds++;
-				}
 			}
-		} while (FindNextFileW(h, &fd));
-		FindClose(h);
-		mod::Log(module, "{} world dir(s) cached under {}", worlds, dir);
+
+			const std::filesystem::path& filePath = directoryEntry.path();
+			if (!EqualsCaseInsensitive(filePath.extension().string(), ".tmx"))
+			{
+				// Not a ".tmx" file
+				continue;
+			}
+
+			std::string mapFilename = filePath.filename().string();
+			if (mapFilename.starts_with("cg_"))
+			{
+				++cashGrabLevels;
+				continue;
+			}
+
+			mapFiles.emplace_back(mapFilename);
+		}
+
+		std::string worldName = worldPath.filename().string();
+		std::ranges::sort(mapFiles, [worldName](const std::string& a, const std::string& b)
+		{
+			return MapFilenameComparator(worldName, a, b);
+		});
+
+		// Construct world with the found maps
+		level_pool::World world
+		{
+			.id = level_pool::WorldNameToId(worldName),
+			.name = worldName
+		};
+		for (const std::string& mapFile : mapFiles)
+		{
+			world.levels.emplace_back(level_pool::Level
+			{
+				.name = mapFile,
+				.gamePath = std::format("levels/versus/{}/{}", world.name, mapFile),
+			});
+		}
+
+		int slotCount = AssignSlots(world);
+		size_t worldIndex = level_pool::worlds.size();
+		level_pool::worlds.push_back(world);
+
+		// Cache mapping from world id to world index
+		if ((world.id >= 1) && (world.id < level_pool::maxWorldId))
+		{
+			level_pool::poolWorldById[world.id] = static_cast<int>(worldIndex);
+		}
+
+		if (world.levels.size() < 2)
+		{
+			mod::Log(module, "WARNING {}: only {} level(s) found (< 2) - {}",
+				world.name, world.levels.size(), slotCount, slotCount == 1 ? "pool count faked to 2 (single-map mode)" : "crash expected");
+		}
+
+		mod::Log(module, "{}: {} levels in pool ({} cash grab maps skipped){}",
+			world.name, world.levels.size(), cashGrabLevels, (world.id < 1) ? " [worldType unknown, not applied]" : "");
+	}
+
+	void PoolInit()
+	{
+		if (mod::resourcesPath.empty())
+		{
+			mod::Log(module, "Resources Path not defined");
+			return;
+		}
+
+		std::filesystem::path versusLevelsPath = mod::resourcesPath.append("levels").append("versus");
+		if (!std::filesystem::is_directory(versusLevelsPath))
+		{
+			mod::Log(module, "Versus Levels Path is not a valid directory {}", versusLevelsPath.string());
+			return;
+		}
+
+		int worlds = 0;
+		for (auto& directoryEntry : std::filesystem::directory_iterator(versusLevelsPath, std::filesystem::directory_options::skip_permission_denied))
+		{
+			if (directoryEntry.is_directory())
+			{
+				AddWorld(directoryEntry.path());
+				++worlds;
+			}
+		}
+
+		mod::Log(module, "{} worlds found under {}", worlds, versusLevelsPath.string());
 	}
 
 	/* ------------------------------------------------------------------ */
 	/* pool editor draft + apply (UI)                                      */
 	/*                                                                     */
 	/* The UI edits a DRAFT copy of the active flags (one vector per world,*/
-	/* parallel to poolWorlds). Apply copies the selected world's draft*/
+	/* parallel to worlds). Apply copies the selected world's draft*/
 	/* into the live cache and recompacts its slots. PoolActiveCount (and */
 	/* and the glv remap) read the LIVE cache, so the count only moves    */
 	/* on Apply. Threading: the draft + live cache are touched by the      */
@@ -207,18 +218,18 @@ namespace
 	/* the live cache via PoolActiveCount (minor race, single-player local*/
 	/* mod -- the UI is used at menus, not during level loads).            */
 	/* ------------------------------------------------------------------ */
-	int poolSelectedWorld = 0; /* index into poolWorlds */
+	int poolSelectedWorld = 0; /* index into worlds */
 	std::vector<std::vector<char> > poolDraft; /* draft active flags (0/1) */
 
-	/* draft = current live flags; once, after PoolCacheBuild */
+	/* draft = current live flags; once, after PoolInit */
 	void PoolDraftInit()
 	{
-		poolDraft.resize(level_pool::poolWorlds.size());
-		for (size_t i = 0; i < level_pool::poolWorlds.size(); i++)
+		poolDraft.resize(level_pool::worlds.size());
+		for (size_t i = 0; i < level_pool::worlds.size(); i++)
 		{
-			poolDraft[i].resize(level_pool::poolWorlds[i].files.size());
-			for (size_t j = 0; j < level_pool::poolWorlds[i].files.size(); j++)
-				poolDraft[i][j] = level_pool::poolWorlds[i].files[j].active ? 1 : 0;
+			poolDraft[i].resize(level_pool::worlds[i].levels.size());
+			for (size_t j = 0; j < level_pool::worlds[i].levels.size(); j++)
+				poolDraft[i][j] = level_pool::worlds[i].levels[j].active ? 1 : 0;
 		}
 		InterlockedExchange(&level_pool::poolReady, 1);
 	}
@@ -226,27 +237,27 @@ namespace
 	/* copy the selected world's draft into the live cache + recompact slots */
 	void PoolApplyWorld(int i)
 	{
-		if (i < 0 || i >= (int) level_pool::poolWorlds.size()) return;
-		level_pool::PoolWorld& w = level_pool::poolWorlds[i];
+		if (i < 0 || i >= (int) level_pool::worlds.size()) return;
+		level_pool::World& w = level_pool::worlds[i];
 		int changed = 0;
-		for (size_t j = 0; j < w.files.size() && j < poolDraft[i].size(); j++)
+		for (size_t j = 0; j < w.levels.size() && j < poolDraft[i].size(); j++)
 		{
 			bool a = poolDraft[i][j] != 0;
-			if (a != w.files[j].active)
+			if (a != w.levels[j].active)
 			{
-				w.files[j].active = a;
+				w.levels[j].active = a;
 				changed++;
 			}
 		}
-		int count = PoolWorldAssignSlots(w);
-		mod::Log(module, "APPLY {} -- count={} ({} flag change(s))", w.dir.c_str(), count, changed);
+		int count = AssignSlots(w);
+		mod::Log(module, "APPLY {} -- count={} ({} flag change(s))", w.name.c_str(), count, changed);
 	}
 
 	/* set every world's draft to a value (1=select all, 0=clear all) and apply
 	 * all worlds into the live cache in one shot. */
 	void PoolApplyAll(int value)
 	{
-		for (size_t i = 0; i < level_pool::poolWorlds.size() && i < poolDraft.size(); i++)
+		for (size_t i = 0; i < level_pool::worlds.size() && i < poolDraft.size(); i++)
 		{
 			for (char& c: poolDraft[i]) c = (char) value;
 			PoolApplyWorld((int) i); /* copies draft -> live + recompacts slots */
@@ -254,10 +265,23 @@ namespace
 		mod::Log(module, "{} all worlds -- count={} applied to every world",
 		         value ? "RESET" : "CLEAR", value);
 	}
+
+	/* count of active files in a worldType's cache entry; 0 = no entry (stock) */
+	int PoolActiveCount(int worldType)
+	{
+		if (worldType < 1 || worldType >= level_pool::maxWorldId) return 0;
+		int idx = level_pool::poolWorldById[worldType];
+		if (idx < 0) return 0;
+		int n = 0;
+		for (const level_pool::Level& f: level_pool::worlds[idx].levels)
+			if (f.active) n++;
+		return n;
+	}
 }
 
-std::vector<level_pool::PoolWorld> level_pool::poolWorlds;
-int level_pool::poolWorldById[] = {-1}; /* index into poolWorlds, -1 = none */
+// extern globals
+std::vector<level_pool::World> level_pool::worlds;
+int level_pool::poolWorldById[] = {-1}; /* index into worlds, -1 = none */
 volatile long level_pool::poolReady = 0; /* cache + draft built */
 /* Random-map selection (render thread writes on combo change; game thread
  * reads in PoolRandPick -- same minor-race pattern as the active flags).
@@ -269,20 +293,20 @@ volatile int level_pool::randMode = 0;
 void level_pool::DrawUi()
 {
 	ImGui::Text("VERSUS LEVEL POOL");
-	if (!poolReady || poolWorlds.empty())
+	if (!poolReady || worlds.empty())
 	{
 		ImGui::TextDisabled("no worlds cached (res/levels/versus missing?)");
 	}
 	else
 	{
-		if (poolSelectedWorld < 0 || poolSelectedWorld >= (int) poolWorlds.size())
+		if (poolSelectedWorld < 0 || poolSelectedWorld >= (int) worlds.size())
 			poolSelectedWorld = 0;
-		const PoolWorld& sel = poolWorlds[poolSelectedWorld];
-		if (ImGui::BeginCombo("##world", sel.dir.c_str()))
+		const World& sel = worlds[poolSelectedWorld];
+		if (ImGui::BeginCombo("##world", sel.name.c_str()))
 		{
-			for (int i = 0; i < (int) poolWorlds.size(); i++)
+			for (int i = 0; i < (int) worlds.size(); i++)
 			{
-				bool s = ImGui::Selectable(poolWorlds[i].dir.c_str(), poolSelectedWorld == i);
+				bool s = ImGui::Selectable(worlds[i].name.c_str(), poolSelectedWorld == i);
 				if (s) poolSelectedWorld = i;
 			}
 			ImGui::EndCombo();
@@ -291,8 +315,9 @@ void level_pool::DrawUi()
 		/* global actions (all worlds) */
 		if (ImGui::Button("Open res folder"))
 		{
-			ShellExecuteA(NULL, "open", resDir, NULL, NULL, SW_SHOWNORMAL);
-			mod::Log(module, "opened res folder {}", resDir);
+			std::string resourcesPathString = mod::resourcesPath.string();
+			ShellExecuteA(NULL, "open", resourcesPathString.c_str(), NULL, NULL, SW_SHOWNORMAL);
+			mod::Log(module, "opened res folder {}", resourcesPathString);
 		}
 		ImGui::SameLine();
 		if (ImGui::Button("Reset All Worlds"))
@@ -303,15 +328,15 @@ void level_pool::DrawUi()
 		ImGui::Spacing();
 		ImGui::BeginChild("##files", ImVec2(0, 300), true);
 		std::vector<char>& draft = poolDraft[poolSelectedWorld];
-		for (size_t j = 0; j < sel.files.size() && j < draft.size(); j++)
+		for (size_t j = 0; j < sel.levels.size() && j < draft.size(); j++)
 		{
 			bool b = draft[j] != 0;
-			if (ImGui::Checkbox(sel.files[j].name.c_str(), &b))
+			if (ImGui::Checkbox(sel.levels[j].name.c_str(), &b))
 				draft[j] = b ? 1 : 0;
 			ImGui::SameLine();
-			ImGui::TextDisabled("%s", sel.files[j].path.c_str());
+			ImGui::TextDisabled("%s", sel.levels[j].gamePath.c_str());
 			ImGui::SameLine();
-			ImGui::TextDisabled(sel.files[j].active ? "[slot %d]" : "[off]", sel.files[j].slot);
+			ImGui::TextDisabled(sel.levels[j].active ? "[slot %d]" : "[off]", sel.levels[j].slot);
 		}
 		ImGui::EndChild();
 		int act = 0;
@@ -326,7 +351,7 @@ void level_pool::DrawUi()
 			         "  (only the first %d slots will be used in Pilot Hunters or Team Annihilation)",
 			         poolCap);
 		ImGui::Text("draft count: %d    live count: %d%s", act, live, hint);
-		if (ImGui::Button(("Apply " + sel.dir).c_str()))
+		if (ImGui::Button(("Apply " + sel.name).c_str()))
 			PoolApplyWorld(poolSelectedWorld);
 		ImGui::SameLine();
 		if (ImGui::Button("Select All"))
@@ -348,7 +373,7 @@ void level_pool::DrawUi()
 
 void level_pool::Init()
 {
-	PoolCacheBuild();
+	PoolInit();
 	PoolDraftInit();
 }
 
@@ -365,19 +390,25 @@ int level_pool::PoolWorldEffectiveCount(int worldType)
 /* world names (log labels)                                            */
 /* ------------------------------------------------------------------ */
 
-const char* level_pool::PoolWorldName(int id)
+const char* level_pool::IdToWorldName(int id)
 {
-	const char* names[poolWorldMax] = {
+	const char* names[maxWorldId] = {
 		"", "mines", "frontier", "flare", "darklab", "echocity", "highrise",
 		"sunken", "graveyard", "gasrigs", "moonbase", "urspace", "void",
 		"legacy", "up", "unsorted"
 	};
-	return (id >= 1 && id < poolWorldMax) ? names[id] : "?";
+	return (id >= 1 && id < maxWorldId) ? names[id] : "?";
 }
 
-int level_pool::PoolWorldId(const char* name)
+int level_pool::WorldNameToId(const std::string& name)
 {
-	for (int i = 1; i < poolWorldMax; i++)
-		if (strcmp(PoolWorldName(i), name) == 0) return i;
+	for (int i = 1; i < maxWorldId; i++)
+	{
+		if (strcmp(IdToWorldName(i), name.c_str()) == 0)
+		{
+			return i;
+		}
+	}
+
 	return 0;
 }
