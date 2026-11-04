@@ -22,45 +22,6 @@ std::ofstream mod::internal::logFileStream;
 
 namespace
 {
-	bool InitLog()
-	{
-		// Construct the path to the log file
-		std::filesystem::path logFilePath;
-		{
-			// Get the local app data path on windows, which our log file is relative to
-			PWSTR appDataPath;
-			if (SHGetKnownFolderPath(mod::logFileFolderId, 0, nullptr, &appDataPath) != S_OK)
-			{
-				// Could not retrieve the local app data path
-				CoTaskMemFree(appDataPath);
-				return false;
-			}
-			logFilePath = std::filesystem::path{appDataPath};
-			CoTaskMemFree(appDataPath);
-		}
-		logFilePath.append(mod::logFile);
-
-		if (!logFilePath.has_filename())
-		{
-			// No file provided
-			return false;
-		}
-
-		if (logFilePath.has_parent_path())
-		{
-			std::error_code error;
-			std::filesystem::create_directories(logFilePath.parent_path(), error);
-			if (error.value())
-			{
-				// Could not create directories
-				return false;
-			}
-		}
-
-		mod::internal::logFileStream.open(logFilePath, std::ofstream::out | std::ofstream::app);
-		return mod::internal::logFileStream.is_open();
-	}
-
 	// When DLL loaded, the VMP stub has NOT run yet and not unpacked the game's executable yet.
 	// Poll until the unpacked image is verifiable, checking the 20-byte shadow-register-store prologue.
 	constexpr uintptr_t unpackPrologueOffset = 0x26cce0;
@@ -102,6 +63,45 @@ namespace
 
 		mod::Log("unpack-gate: TIMEOUT after {} - packed bytes at +0x26cce0: {:02X} {:02X} {:02X} .. {:02X} {:02X} {:02X}", getDuration(), prologue[0], prologue[1], prologue[2], prologue[17], prologue[18], prologue[19]);
 		return false;
+	}
+
+	bool InitLog()
+	{
+		// Construct the path to the log file
+		std::filesystem::path logFilePath;
+		{
+			// Get the local app data path on windows, which our log file is relative to
+			PWSTR appDataPath;
+			if (SHGetKnownFolderPath(mod::logFileFolderId, 0, nullptr, &appDataPath) != S_OK)
+			{
+				// Could not retrieve the local app data path
+				CoTaskMemFree(appDataPath);
+				return false;
+			}
+			logFilePath = std::filesystem::path{appDataPath};
+			CoTaskMemFree(appDataPath);
+		}
+		logFilePath.append(mod::logFile);
+
+		if (!logFilePath.has_filename())
+		{
+			// No file provided
+			return false;
+		}
+
+		if (logFilePath.has_parent_path())
+		{
+			std::error_code error;
+			std::filesystem::create_directories(logFilePath.parent_path(), error);
+			if (error.value())
+			{
+				// Could not create directories
+				return false;
+			}
+		}
+
+		mod::internal::logFileStream.open(logFilePath, std::ofstream::out | std::ofstream::app);
+		return mod::internal::logFileStream.is_open();
 	}
 }
 
