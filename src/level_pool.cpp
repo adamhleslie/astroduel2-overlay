@@ -10,36 +10,20 @@
 #include <filesystem>
 #include <shellapi.h>
 
+// extern globals
+std::vector<level_pool::World> level_pool::worlds;
+int level_pool::poolWorldById[] = {-1}; /* index into worlds, -1 = none */
+volatile long level_pool::poolReady = 0; /* cache + draft built */
+/* Random-map selection (render thread writes on combo change; game thread
+ * reads in PoolRandPick -- same minor-race pattern as the active flags).
+ * 0=Off, 1=WorldActive, 2=World, 3=AnyActive, 4=Any. Only ever reaches
+ * PH/TA walk loads: deathmatch (pick=2), cash grab (pick=3) and the
+ * deathmatch UI preview (mode=1) are all excluded in GetLevelRemap. */
+volatile int level_pool::randMode = 0;
+
 namespace
 {
 	constexpr std::string module = "level-pool";
-
-	/* ------------------------------------------------------------------ */
-	/* versus level cache -- per-world .tmx inventory + the count source  */
-	/*                                                                     */
-	/* Built once at startup: enumerate every subdirectory of             */
-	/* <gamedir>/res/levels/versus (the overlay DLL sits in the game dir  */
-	/* as steaapi64.dll, so its module path is the base) and, for each  */
-	/* world dir, every *.tmx in it. One cache object per world; each     */
-	/* file entry carries:                                                */
-	/*   name   -- the file's basename                                    */
-	/*   active -- in the live pool; default = every scanned file on;    */
-	/*             "cg_" (Cash Grab) files are skipped entirely at scan  */
-	/*             time and never enter the pool                         */
-	/*   slot   -- the preload slot the file will be pre-loaded to;       */
-	/*             active files take slots 1..K in sort order, inactive   */
-	/*             files hold no slot (0)                                 */
-	/* Sort is natural: numbered files by ascending trailing number,      */
-	/* then non-numbered files alphabetically (cg_* files never reach    */
-	/* the sort -- they are dropped at scan time).                        */
-	/* The world's count is K = number of active files (Apply is blocked  */
-	/* only at 0); slots above POOL_CAP are harmless but unreachable --   */
-	/* the walk's pool tops out at 12. The game                          */
-	/* preloads slots 1..K contiguously, so this table doubles as the glv */
-	/* remap (num -> file), enforced in GetLevelRemap. A world with no    */
-	/* cache entry (or no active files) runs stock.                       */
-	/* for active-flag persistence (a future UI step) -- not read here.   */
-	/* ------------------------------------------------------------------ */
 
 	// Updates level slots within the provided world based on their active state
 	// Returns the number of slots taken up, which is equivalent to the number of active levels
@@ -206,68 +190,32 @@ namespace
 		mod::Log(module, "{} worlds found under {}", worlds, versusLevelsPath.string());
 	}
 
-	/* ------------------------------------------------------------------ */
-	/* pool editor draft + apply (UI)                                      */
-	/*                                                                     */
-	/* The UI edits a DRAFT copy of the active flags (one vector per world,*/
-	/* parallel to worlds). Apply copies the selected world's draft*/
-	/* into the live cache and recompacts its slots. PoolActiveCount (and */
-	/* and the glv remap) read the LIVE cache, so the count only moves    */
-	/* on Apply. Threading: the draft + live cache are touched by the      */
-	/* render thread (UI) only after poolReady; the game thread reads   */
-	/* the live cache via PoolActiveCount (minor race, single-player local*/
-	/* mod -- the UI is used at menus, not during level loads).            */
-	/* ------------------------------------------------------------------ */
-	int poolSelectedWorld = 0; /* index into worlds */
-	std::vector<std::vector<char> > poolDraft; /* draft active flags (0/1) */
-
-	/* draft = current live flags; once, after PoolInit */
-	void PoolDraftInit()
+	// Pool Editor - UI edits the level active state directly
+	int selectedWorldIndex = 0;
+	void SetAllLevelsActive(bool active, level_pool::World& world)
 	{
-		poolDraft.resize(level_pool::worlds.size());
-		for (size_t i = 0; i < level_pool::worlds.size(); i++)
+		for (level_pool::Level& level : world.levels)
 		{
-			poolDraft[i].resize(level_pool::worlds[i].levels.size());
-			for (size_t j = 0; j < level_pool::worlds[i].levels.size(); j++)
-				poolDraft[i][j] = level_pool::worlds[i].levels[j].active ? 1 : 0;
+			level.active = active;
 		}
-		InterlockedExchange(&level_pool::poolReady, 1);
+
+		AssignSlots(world);
+		mod::Log(module, "{} set all levels {}", world.name, active ? "active" : "inactive");
 	}
 
-	/* copy the selected world's draft into the live cache + recompact slots */
-	void PoolApplyWorld(int i)
+	// Set every level to an active state and applies in one shot
+	void SetAllLevelsActive(bool active)
 	{
-		if (i < 0 || i >= (int) level_pool::worlds.size()) return;
-		level_pool::World& w = level_pool::worlds[i];
-		int changed = 0;
-		for (size_t j = 0; j < w.levels.size() && j < poolDraft[i].size(); j++)
+		for (level_pool::World& world : level_pool::worlds)
 		{
-			bool a = poolDraft[i][j] != 0;
-			if (a != w.levels[j].active)
-			{
-				w.levels[j].active = a;
-				changed++;
-			}
+			SetAllLevelsActive(active, world);
 		}
-		int count = AssignSlots(w);
-		mod::Log(module, "APPLY {} -- count={} ({} flag change(s))", w.name.c_str(), count, changed);
+
+		mod::Log(module, "{} all worlds -- count={} applied to every world", active ? "RESET" : "CLEAR", active);
 	}
 
-	/* set every world's draft to a value (1=select all, 0=clear all) and apply
-	 * all worlds into the live cache in one shot. */
-	void PoolApplyAll(int value)
-	{
-		for (size_t i = 0; i < level_pool::worlds.size() && i < poolDraft.size(); i++)
-		{
-			for (char& c: poolDraft[i]) c = (char) value;
-			PoolApplyWorld((int) i); /* copies draft -> live + recompacts slots */
-		}
-		mod::Log(module, "{} all worlds -- count={} applied to every world",
-		         value ? "RESET" : "CLEAR", value);
-	}
-
-	/* count of active files in a worldType's cache entry; 0 = no entry (stock) */
-	int PoolActiveCount(int worldType)
+	// Count of active files in a worldType's cache entry; 0 = no entry (stock)
+	int GetActiveCount(int worldType)
 	{
 		if (worldType < 1 || worldType >= level_pool::maxWorldId) return 0;
 		int idx = level_pool::poolWorldById[worldType];
@@ -279,17 +227,6 @@ namespace
 	}
 }
 
-// extern globals
-std::vector<level_pool::World> level_pool::worlds;
-int level_pool::poolWorldById[] = {-1}; /* index into worlds, -1 = none */
-volatile long level_pool::poolReady = 0; /* cache + draft built */
-/* Random-map selection (render thread writes on combo change; game thread
- * reads in PoolRandPick -- same minor-race pattern as the active flags).
- * 0=Off, 1=WorldActive, 2=World, 3=AnyActive, 4=Any. Only ever reaches
- * PH/TA walk loads: deathmatch (pick=2), cash grab (pick=3) and the
- * deathmatch UI preview (mode=1) are all excluded in GetLevelRemap. */
-volatile int level_pool::randMode = 0;
-
 void level_pool::DrawUi()
 {
 	ImGui::Text("VERSUS LEVEL POOL");
@@ -299,15 +236,15 @@ void level_pool::DrawUi()
 	}
 	else
 	{
-		if (poolSelectedWorld < 0 || poolSelectedWorld >= (int) worlds.size())
-			poolSelectedWorld = 0;
-		const World& sel = worlds[poolSelectedWorld];
+		if (selectedWorldIndex < 0 || selectedWorldIndex >= (int) worlds.size())
+			selectedWorldIndex = 0;
+		World& sel = worlds[selectedWorldIndex];
 		if (ImGui::BeginCombo("##world", sel.name.c_str()))
 		{
 			for (int i = 0; i < (int) worlds.size(); i++)
 			{
-				bool s = ImGui::Selectable(worlds[i].name.c_str(), poolSelectedWorld == i);
-				if (s) poolSelectedWorld = i;
+				bool s = ImGui::Selectable(worlds[i].name.c_str(), selectedWorldIndex == i);
+				if (s) selectedWorldIndex = i;
 			}
 			ImGui::EndCombo();
 		}
@@ -321,52 +258,48 @@ void level_pool::DrawUi()
 		}
 		ImGui::SameLine();
 		if (ImGui::Button("Reset All Worlds"))
-			PoolApplyAll(1);
+			SetAllLevelsActive(true);
 		ImGui::SameLine();
 		if (ImGui::Button("Clear All Worlds"))
-			PoolApplyAll(0);
+			SetAllLevelsActive(false);
 		ImGui::Spacing();
 		ImGui::BeginChild("##files", ImVec2(0, 300), true);
-		std::vector<char>& draft = poolDraft[poolSelectedWorld];
-		for (size_t j = 0; j < sel.levels.size() && j < draft.size(); j++)
+		for (size_t j = 0; j < sel.levels.size(); j++)
 		{
-			bool b = draft[j] != 0;
-			if (ImGui::Checkbox(sel.levels[j].name.c_str(), &b))
-				draft[j] = b ? 1 : 0;
+			if (ImGui::Checkbox(sel.levels[j].name.c_str(), &sel.levels[j].active))
+			{
+				AssignSlots(sel);
+			}
 			ImGui::SameLine();
 			ImGui::TextDisabled("%s", sel.levels[j].gamePath.c_str());
 			ImGui::SameLine();
 			ImGui::TextDisabled(sel.levels[j].active ? "[slot %d]" : "[off]", sel.levels[j].slot);
 		}
 		ImGui::EndChild();
-		int act = 0;
-		for (char c: draft) if (c) act++;
-		int liveRaw = PoolActiveCount(sel.id);
-		int live = PoolWorldEffectiveCount(sel.id);
+		int activeCountRaw = GetActiveCount(sel.id);
+		int activeCount = PoolWorldEffectiveCount(sel.id);
 		char hint[112] = "";
-		if (liveRaw == 0) snprintf(hint, sizeof hint, "  (0 maps -- crash expected, below walk minimum)");
-		else if (liveRaw == 1) snprintf(hint, sizeof hint, "  (1 map -> faked to 2)");
-		else if (liveRaw > poolCap)
-			snprintf(hint, sizeof hint,
-			         "  (only the first %d slots will be used in Pilot Hunters or Team Annihilation)",
-			         poolCap);
-		ImGui::Text("draft count: %d    live count: %d%s", act, live, hint);
-		if (ImGui::Button(("Apply " + sel.name).c_str()))
-			PoolApplyWorld(poolSelectedWorld);
-		ImGui::SameLine();
+		if (activeCountRaw == 0) snprintf(hint, sizeof hint, "  (0 maps -- crash expected, below walk minimum)");
+		else if (activeCountRaw == 1) snprintf(hint, sizeof hint, "  (1 map -> faked to 2)");
+		else if (activeCountRaw > poolCap) snprintf(hint, sizeof hint, " (only the first %d slots will be used in Pilot Hunters or Team Annihilation)", poolCap);
+		ImGui::Text("active count: %d%s", activeCount, hint);
 		if (ImGui::Button("Select All"))
-			for (char& c: draft) c = 1;
+		{
+			SetAllLevelsActive(true, sel);
+		}
 		ImGui::SameLine();
 		if (ImGui::Button("Clear Selection"))
-			for (char& c: draft) c = 0;
+		{
+			SetAllLevelsActive(false, sel);
+		}
 
 		/* random-map selection (PH/TA loads only; deathmatch / cash grab /
 		   deathmatch preview are excluded in GetLevelRemap) */
 		const char* kRandModes[] = {"Off", "WorldActive", "World", "AnyActive", "Any"};
-		int randSel = 0;
+		int randSel = randMode;
 		if (ImGui::Combo("Random map (PH/TA only)", &randSel, kRandModes, 5))
 			randMode = randSel;
-		if (randMode == 1 && live == 0)
+		if (randMode == 1 && activeCount == 0)
 			ImGui::TextDisabled("WorldActive pool empty (0 maps) -- random falls through");
 	}
 }
@@ -374,7 +307,7 @@ void level_pool::DrawUi()
 void level_pool::Init()
 {
 	PoolInit();
-	PoolDraftInit();
+	InterlockedExchange(&poolReady, 1); // TODO: Refactor to use stl
 }
 
 /* the count the game actually sees: a single-map world is faked to 2,
@@ -382,7 +315,7 @@ void level_pool::Init()
    nums (1 and 2) resolve to the lone active file in GetLevelRemap. */
 int level_pool::PoolWorldEffectiveCount(int worldType)
 {
-	int n = PoolActiveCount(worldType);
+	int n = GetActiveCount(worldType);
 	return (n == 1) ? 2 : n;
 }
 
@@ -390,7 +323,7 @@ int level_pool::PoolWorldEffectiveCount(int worldType)
 /* world names (log labels)                                            */
 /* ------------------------------------------------------------------ */
 
-const char* level_pool::IdToWorldName(int id)
+const char* level_pool::WorldIdToName(int id)
 {
 	const char* names[maxWorldId] = {
 		"", "mines", "frontier", "flare", "darklab", "echocity", "highrise",
@@ -404,7 +337,7 @@ int level_pool::WorldNameToId(const std::string& name)
 {
 	for (int i = 1; i < maxWorldId; i++)
 	{
-		if (strcmp(IdToWorldName(i), name.c_str()) == 0)
+		if (strcmp(WorldIdToName(i), name.c_str()) == 0)
 		{
 			return i;
 		}

@@ -70,7 +70,7 @@ static void* GetWorldDataHook(void* out, int worldType)
 	const int ov = level_pool::PoolWorldEffectiveCount(worldType);
 	if (ov) f[3] = ov;
 	mod::Log(worldDataModule, "world={}({}) out={} cnt={} (stock {}){} ra0={:#010X}",
-	         worldType, level_pool::IdToWorldName(worldType), r, f[3], stock,
+	         worldType, level_pool::WorldIdToName(worldType), r, f[3], stock,
 	         ov ? " OVERRIDDEN" : "",(uint32_t) ((uintptr_t) _ReturnAddress() - mod::ad2ModuleBase));
 	return r;
 }
@@ -260,7 +260,7 @@ static void GetLevelRemap(void* out, int world, int num, int pick, int mode)
 		if (PoolRandPick(level_pool::randMode, world, &rpath))
 		{
 			reinterpret_cast<std::string*>(out)->assign(rpath);
-			mod::Log(levelModule, "RAND mode={} world={}({}) num={} -> {}", static_cast<int>(level_pool::randMode), world, level_pool::IdToWorldName(world), num, rpath);
+			mod::Log(levelModule, "RAND mode={} world={}({}) num={} -> {}", static_cast<int>(level_pool::randMode), world, level_pool::WorldIdToName(world), num, rpath);
 			return;
 		}
 	}
@@ -288,16 +288,16 @@ static void GetLevelRemap(void* out, int world, int num, int pick, int mode)
 	}
 	if (!pf)
 	{
-		mod::Log(levelModule, "REMAP MISS - world={}({}) num={} - no slot (outside active pool)", world, level_pool::IdToWorldName(world), num);
+		mod::Log(levelModule, "REMAP MISS - world={}({}) num={} - no slot (outside active pool)", world, level_pool::WorldIdToName(world), num);
 		return;
 	}
 	char ident[48];
-	snprintf(ident, sizeof ident, "%s%d.tmx", level_pool::IdToWorldName(world), num);
+	snprintf(ident, sizeof ident, "%s%d.tmx", level_pool::WorldIdToName(world), num);
 	if (strcmp(pf->name.c_str(), ident) == 0) return; /* identity: file IS slot num */
 	char np[192];
 	snprintf(np, sizeof np, "levels/versus/%s/%s", w.name.c_str(), pf->name.c_str());
 	reinterpret_cast<std::string*>(out)->assign(np, strlen(np));
-	mod::Log(levelModule, "REMAP - world={}({}) slot={} {} -> {}", world, level_pool::IdToWorldName(world), num, ident, pf->name.c_str());
+	mod::Log(levelModule, "REMAP - world={}({}) slot={} {} -> {}", world, level_pool::WorldIdToName(world), num, ident, pf->name.c_str());
 }
 
 static void* GetLevelHook(void* out, int world, int num, char mode)
@@ -324,7 +324,7 @@ static void* GetLevelHook(void* out, int world, int num, char mode)
 	char path[160];
 	PeekStdString(out, path, sizeof(path)); /* post-rewrite: the final path */
 	mod::Log(levelModule, "world={}({}) num={} mode={} pick={} spec={} cnt={} path=\"{}\" ret={} ra0={:#010X}",
-	         world, level_pool::IdToWorldName(world), num, (int) mode, pick, spec, cnt, path, ret,
+	         world, level_pool::WorldIdToName(world), num, (int) mode, pick, spec, cnt, path, ret,
 	         (uint32_t) ((uintptr_t) _ReturnAddress() - mod::ad2ModuleBase));
 	return ret;
 }
