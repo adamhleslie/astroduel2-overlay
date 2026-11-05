@@ -16,7 +16,7 @@ namespace level_pool
 {
 	void Init();
 	void DrawUi();
-	int PoolWorldEffectiveCount(int worldType);
+	int GetLevelCountForType(int worldType);
 	const char* WorldIdToName(int id);
 	int WorldNameToId(const std::string& name);
 
@@ -40,7 +40,7 @@ namespace level_pool
 
 	constexpr int maxWorldId = 16; /* world ids 1..15 */
 	constexpr int poolCap = 12; /* reachable ceiling: the walk pool only ever emits 1..12 */
-	extern int poolWorldById[maxWorldId];
+	extern int poolWorldById[maxWorldId]; // TODO: User std::array
 
 	extern volatile int randMode;
 }

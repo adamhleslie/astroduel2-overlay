@@ -67,7 +67,7 @@ static void* GetWorldDataHook(void* out, int worldType)
 	void* r = ((FnGetWorldData) getWorldDataOrig)(out, worldType);
 	int* f = (int*) r; /* f[0..3] = d0,d1,d2,d3 */
 	const int stock = f[3];
-	const int ov = level_pool::PoolWorldEffectiveCount(worldType);
+	const int ov = level_pool::GetLevelCountForType(worldType);
 	if (ov) f[3] = ov;
 	mod::Log(worldDataModule, "world={}({}) out={} cnt={} (stock {}){} ra0={:#010X}",
 	         worldType, level_pool::WorldIdToName(worldType), r, f[3], stock,

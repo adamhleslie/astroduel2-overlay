@@ -214,16 +214,35 @@ namespace
 		mod::Log(module, "{} all worlds -- count={} applied to every world", active ? "RESET" : "CLEAR", active);
 	}
 
+	int GetActiveCount(const level_pool::World& world)
+	{
+		int n = 0;
+		for (const level_pool::Level& level : world.levels)
+		{
+			if (level.active)
+			{
+				n++;
+			}
+		}
+
+		return n;
+	}
+
 	// Count of active files in a worldType's cache entry; 0 = no entry (stock)
 	int GetActiveCount(int worldType)
 	{
-		if (worldType < 1 || worldType >= level_pool::maxWorldId) return 0;
-		int idx = level_pool::poolWorldById[worldType];
-		if (idx < 0) return 0;
-		int n = 0;
-		for (const level_pool::Level& f: level_pool::worlds[idx].levels)
-			if (f.active) n++;
-		return n;
+		if ((worldType < 1) || worldType >= level_pool::maxWorldId)
+		{
+			return 0;
+		}
+
+		int worldIndex = level_pool::poolWorldById[worldType];
+		if (worldIndex < 0)
+		{
+			return 0;
+		}
+
+		return GetActiveCount(level_pool::worlds[worldIndex]);
 	}
 }
 
@@ -277,7 +296,7 @@ void level_pool::DrawUi()
 		}
 		ImGui::EndChild();
 		int activeCountRaw = GetActiveCount(sel.id);
-		int activeCount = PoolWorldEffectiveCount(sel.id);
+		int activeCount = GetLevelCountForType(sel.id);
 		char hint[112] = "";
 		if (activeCountRaw == 0) snprintf(hint, sizeof hint, "  (0 maps -- crash expected, below walk minimum)");
 		else if (activeCountRaw == 1) snprintf(hint, sizeof hint, "  (1 map -> faked to 2)");
@@ -313,7 +332,7 @@ void level_pool::Init()
 /* the count the game actually sees: a single-map world is faked to 2,
    because the walk's exhaust path is an assert (K must be >= 2). Both
    nums (1 and 2) resolve to the lone active file in GetLevelRemap. */
-int level_pool::PoolWorldEffectiveCount(int worldType)
+int level_pool::GetLevelCountForType(int worldType)
 {
 	int n = GetActiveCount(worldType);
 	return (n == 1) ? 2 : n;
