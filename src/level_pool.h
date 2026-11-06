@@ -14,26 +14,32 @@
  */
 namespace level_pool
 {
-	void Init();
-	void DrawUi();
-	int GetLevelCountForType(int worldType);
-	const char* WorldIdToName(int id);
-	int WorldNameToId(const std::string& name);
-
 	struct Level
 	{
 		std::string name;
 		std::string gamePath;
-		bool active = true;
-		int slot = 0;
+		bool active;
+		int slot;
 	};
 
 	struct World
 	{
+		World(std::string name, const std::vector<std::string>& levelNames);
+
+		int UpdateSlots();
+		void SetAllLevelsActive(bool active);
+		int GetActiveLevelCount() const;
+
 		int id;
 		std::string name;
 		std::vector<Level> levels;
 	};
+
+	void Init();
+	void DrawUi();
+	int GetActiveLevelCountForType(int worldType);
+	const char* WorldIdToName(int id);
+	int WorldNameToId(const std::string& name);
 
 	extern std::vector<World> worlds;
 	extern volatile long poolReady;

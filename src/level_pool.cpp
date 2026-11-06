@@ -8,6 +8,7 @@
 #include <vector>
 #include <algorithm>
 #include <filesystem>
+#include <ranges>
 #include <shellapi.h>
 
 // extern globals
@@ -24,19 +25,7 @@ volatile int level_pool::randMode = 0;
 namespace
 {
 	constexpr std::string module = "level-pool";
-
-	// Updates level slots within the provided world based on their active state
-	// Returns the number of slots taken up, which is equivalent to the number of active levels
-	int AssignSlots(level_pool::World& world)
-	{
-		int slotCount = 0;
-		for (level_pool::Level& level: world.levels)
-		{
-			level.slot = level.active ? ++slotCount : 0;
-		}
-
-		return slotCount;
-	}
+	int selectedWorldIndex = 0;
 
 	bool EqualsCaseInsensitive(const std::string& a, const std::string& b)
 	{
@@ -96,7 +85,7 @@ namespace
 
 		// Collect map files under the world directory
 		int cashGrabLevels = 0;
-		std::vector<std::string> mapFiles;
+		std::vector<std::string> mapFilenames;
 		for (auto& directoryEntry : std::filesystem::directory_iterator(worldPath, std::filesystem::directory_options::skip_permission_denied))
 		{
 			if (!directoryEntry.is_regular_file())
@@ -118,31 +107,19 @@ namespace
 				continue;
 			}
 
-			mapFiles.emplace_back(mapFilename);
+			mapFilenames.emplace_back(mapFilename);
 		}
 
 		std::string worldName = worldPath.filename().string();
-		std::ranges::sort(mapFiles, [worldName](const std::string& a, const std::string& b)
+		std::ranges::sort(mapFilenames, [worldName](const std::string& a, const std::string& b)
 		{
 			return MapFilenameComparator(worldName, a, b);
 		});
 
 		// Construct world with the found maps
-		level_pool::World world
-		{
-			.id = level_pool::WorldNameToId(worldName),
-			.name = worldName
-		};
-		for (const std::string& mapFile : mapFiles)
-		{
-			world.levels.emplace_back(level_pool::Level
-			{
-				.name = mapFile,
-				.gamePath = std::format("levels/versus/{}/{}", world.name, mapFile),
-			});
-		}
+		level_pool::World world{worldName, mapFilenames};
 
-		int slotCount = AssignSlots(world);
+		int activeCount = world.GetActiveLevelCount();
 		size_t worldIndex = level_pool::worlds.size();
 		level_pool::worlds.push_back(world);
 
@@ -155,7 +132,7 @@ namespace
 		if (world.levels.size() < 2)
 		{
 			mod::Log(module, "WARNING {}: only {} level(s) found (< 2) - {}",
-				world.name, world.levels.size(), slotCount, slotCount == 1 ? "pool count faked to 2 (single-map mode)" : "crash expected");
+				world.name, world.levels.size(), activeCount, activeCount == 1 ? "pool count faked to 2 (single-map mode)" : "crash expected");
 		}
 
 		mod::Log(module, "{}: {} levels in pool ({} cash grab maps skipped){}",
@@ -190,61 +167,93 @@ namespace
 		mod::Log(module, "{} worlds found under {}", worlds, versusLevelsPath.string());
 	}
 
-	// Pool Editor - UI edits the level active state directly
-	int selectedWorldIndex = 0;
-	void SetAllLevelsActive(bool active, level_pool::World& world)
-	{
-		for (level_pool::Level& level : world.levels)
-		{
-			level.active = active;
-		}
-
-		AssignSlots(world);
-		mod::Log(module, "{} set all levels {}", world.name, active ? "active" : "inactive");
-	}
-
 	// Set every level to an active state and applies in one shot
 	void SetAllLevelsActive(bool active)
 	{
 		for (level_pool::World& world : level_pool::worlds)
 		{
-			SetAllLevelsActive(active, world);
+			world.SetAllLevelsActive(active);
 		}
 
 		mod::Log(module, "{} all worlds -- count={} applied to every world", active ? "RESET" : "CLEAR", active);
 	}
 
-	int GetActiveCount(const level_pool::World& world)
-	{
-		int n = 0;
-		for (const level_pool::Level& level : world.levels)
-		{
-			if (level.active)
-			{
-				n++;
-			}
-		}
-
-		return n;
-	}
-
-	// Count of active files in a worldType's cache entry; 0 = no entry (stock)
-	int GetActiveCount(int worldType)
+	std::optional<std::reference_wrapper<level_pool::World>> GetWorldForType(int worldType)
 	{
 		if ((worldType < 1) || worldType >= level_pool::maxWorldId)
 		{
-			return 0;
+			return std::nullopt;
 		}
 
 		int worldIndex = level_pool::poolWorldById[worldType];
 		if (worldIndex < 0)
 		{
-			return 0;
+			return std::nullopt;
 		}
 
-		return GetActiveCount(level_pool::worlds[worldIndex]);
+		return level_pool::worlds[worldIndex];
 	}
 }
+
+#pragma region World
+
+level_pool::World::World(std::string name, const std::vector<std::string>& levelNames)
+	: id{WorldNameToId(name)}
+	, name{std::move(name)}
+	, levels{levelNames.size()}
+{
+	for (const auto [i, levelName] : levelNames | std::ranges::views::enumerate)
+	{
+		levels[i] = Level
+		{
+			.name = levelName,
+			.gamePath = std::format("levels/versus/{}/{}", name, levelName),
+			.active = true,
+		};
+	}
+
+	UpdateSlots();
+}
+
+// Updates level slots within the provided world based on their active state
+// Returns the number of slots taken up, which is equivalent to the number of active levels
+int level_pool::World::UpdateSlots()
+{
+	int slotCount = 0;
+	for (Level& level: levels)
+	{
+		level.slot = (level.active ? ++slotCount : 0);
+	}
+
+	return slotCount;
+}
+
+void level_pool::World::SetAllLevelsActive(bool active)
+{
+	for (Level& level : levels)
+	{
+		level.active = active;
+	}
+
+	UpdateSlots();
+	mod::Log(module, "{} set all levels {}", name, active ? "active" : "inactive");
+}
+
+int level_pool::World::GetActiveLevelCount() const
+{
+	int n = 0;
+	for (const Level& level : levels)
+	{
+		if (level.active)
+		{
+			n++;
+		}
+	}
+
+	return n;
+}
+
+#pragma endregion
 
 void level_pool::DrawUi()
 {
@@ -287,7 +296,7 @@ void level_pool::DrawUi()
 		{
 			if (ImGui::Checkbox(sel.levels[j].name.c_str(), &sel.levels[j].active))
 			{
-				AssignSlots(sel);
+				sel.UpdateSlots();
 			}
 			ImGui::SameLine();
 			ImGui::TextDisabled("%s", sel.levels[j].gamePath.c_str());
@@ -295,8 +304,8 @@ void level_pool::DrawUi()
 			ImGui::TextDisabled(sel.levels[j].active ? "[slot %d]" : "[off]", sel.levels[j].slot);
 		}
 		ImGui::EndChild();
-		int activeCountRaw = GetActiveCount(sel.id);
-		int activeCount = GetLevelCountForType(sel.id);
+		int activeCountRaw = sel.GetActiveLevelCount();
+		int activeCount = sel.GetActiveLevelCount();
 		char hint[112] = "";
 		if (activeCountRaw == 0) snprintf(hint, sizeof hint, "  (0 maps -- crash expected, below walk minimum)");
 		else if (activeCountRaw == 1) snprintf(hint, sizeof hint, "  (1 map -> faked to 2)");
@@ -304,12 +313,12 @@ void level_pool::DrawUi()
 		ImGui::Text("active count: %d%s", activeCount, hint);
 		if (ImGui::Button("Select All"))
 		{
-			SetAllLevelsActive(true, sel);
+			sel.SetAllLevelsActive(true);
 		}
 		ImGui::SameLine();
 		if (ImGui::Button("Clear Selection"))
 		{
-			SetAllLevelsActive(false, sel);
+			sel.SetAllLevelsActive(false);
 		}
 
 		/* random-map selection (PH/TA loads only; deathmatch / cash grab /
@@ -332,10 +341,16 @@ void level_pool::Init()
 /* the count the game actually sees: a single-map world is faked to 2,
    because the walk's exhaust path is an assert (K must be >= 2). Both
    nums (1 and 2) resolve to the lone active file in GetLevelRemap. */
-int level_pool::GetLevelCountForType(int worldType)
+int level_pool::GetActiveLevelCountForType(int worldType)
 {
-	int n = GetActiveCount(worldType);
-	return (n == 1) ? 2 : n;
+	if (auto worldOption = GetWorldForType(worldType))
+	{
+		World& world = *worldOption;
+		int activeLevelCount = world.GetActiveLevelCount();
+		return (activeLevelCount == 1) ? 2 : activeLevelCount;
+	}
+
+	return 0;
 }
 
 /* ------------------------------------------------------------------ */
