@@ -11,9 +11,6 @@
 #include <ranges>
 #include <shellapi.h>
 
-// extern globals
-std::vector<level_pool::World> level_pool::worlds;
-int level_pool::poolWorldById[] = {-1}; /* index into worlds, -1 = none */
 volatile long level_pool::poolReady = 0; /* cache + draft built */
 /* Random-map selection (render thread writes on combo change; game thread
  * reads in PoolRandPick -- same minor-race pattern as the active flags).
@@ -25,7 +22,11 @@ volatile int level_pool::randMode = 0;
 namespace
 {
 	constexpr std::string module = "level-pool";
-	int selectedWorldIndex = 0;
+	size_t selectedWorldIndex = 0;
+
+	// extern globals
+	std::vector<level_pool::World> worlds;
+	std::array<int, level_pool::maxWorldType> worldIndexByType; /* index into worlds, -1 = none */
 
 	bool EqualsCaseInsensitive(const std::string& a, const std::string& b)
 	{
@@ -120,13 +121,13 @@ namespace
 		level_pool::World world{worldName, mapFilenames};
 
 		int activeCount = world.GetActiveLevelCount();
-		size_t worldIndex = level_pool::worlds.size();
-		level_pool::worlds.push_back(world);
+		size_t worldIndex = worlds.size();
+		worlds.push_back(world);
 
-		// Cache mapping from world id to world index
-		if ((world.id >= 1) && (world.id < level_pool::maxWorldId))
+		// Cache mapping from world type to world index
+		if ((world.type >= 1) && (world.type < level_pool::maxWorldType))
 		{
-			level_pool::poolWorldById[world.id] = static_cast<int>(worldIndex);
+			worldIndexByType[world.type] = static_cast<int>(worldIndex);
 		}
 
 		if (world.levels.size() < 2)
@@ -136,7 +137,7 @@ namespace
 		}
 
 		mod::Log(module, "{}: {} levels in pool ({} cash grab maps skipped){}",
-			world.name, world.levels.size(), cashGrabLevels, (world.id < 1) ? " [worldType unknown, not applied]" : "");
+			world.name, world.levels.size(), cashGrabLevels, (world.type < 1) ? " [worldType unknown, not applied]" : "");
 	}
 
 	void PoolInit()
@@ -170,35 +171,19 @@ namespace
 	// Set every level to an active state and applies in one shot
 	void SetAllLevelsActive(bool active)
 	{
-		for (level_pool::World& world : level_pool::worlds)
+		for (level_pool::World& world : worlds)
 		{
 			world.SetAllLevelsActive(active);
 		}
 
 		mod::Log(module, "{} all worlds -- count={} applied to every world", active ? "RESET" : "CLEAR", active);
 	}
-
-	std::optional<std::reference_wrapper<level_pool::World>> GetWorldForType(int worldType)
-	{
-		if ((worldType < 1) || worldType >= level_pool::maxWorldId)
-		{
-			return std::nullopt;
-		}
-
-		int worldIndex = level_pool::poolWorldById[worldType];
-		if (worldIndex < 0)
-		{
-			return std::nullopt;
-		}
-
-		return level_pool::worlds[worldIndex];
-	}
 }
 
 #pragma region World
 
 level_pool::World::World(std::string name, const std::vector<std::string>& levelNames)
-	: id{WorldNameToId(name)}
+	: type{WorldNameToType(name)}
 	, name{std::move(name)}
 	, levels{levelNames.size()}
 {
@@ -253,6 +238,15 @@ int level_pool::World::GetActiveLevelCount() const
 	return n;
 }
 
+/* the count the game actually sees: a single-map world is faked to 2,
+   because the walk's exhaust path is an assert (K must be >= 2). Both
+   nums (1 and 2) resolve to the lone active file in GetLevelRemap. */
+int level_pool::World::GetGameLevelCount() const
+{
+	int activeLevelCount = GetActiveLevelCount();
+	return (activeLevelCount == 1) ? 2 : activeLevelCount;
+}
+
 #pragma endregion
 
 void level_pool::DrawUi()
@@ -264,118 +258,145 @@ void level_pool::DrawUi()
 	}
 	else
 	{
-		if (selectedWorldIndex < 0 || selectedWorldIndex >= (int) worlds.size())
-			selectedWorldIndex = 0;
-		World& sel = worlds[selectedWorldIndex];
-		if (ImGui::BeginCombo("##world", sel.name.c_str()))
+		if ((selectedWorldIndex < 0) || (selectedWorldIndex >= worlds.size()))
 		{
-			for (int i = 0; i < (int) worlds.size(); i++)
+			selectedWorldIndex = 0;
+		}
+		World& selectedWorld = worlds[selectedWorldIndex];
+
+		// Global Actions
+		if (ImGui::Button("Open res folder"))
+		{
+			std::string resourcesPathString = mod::resourcesPath.string();
+			ShellExecuteA(nullptr, "open", resourcesPathString.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+			mod::Log(module, "Opened res folder {}", resourcesPathString);
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Reset All Worlds"))
+		{
+			SetAllLevelsActive(true);
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Clear All Worlds"))
+		{
+			SetAllLevelsActive(false);
+		}
+		ImGui::Spacing();
+
+		// Custom randomized map selection (Pilot Hunters / Team Annihilation only)
+		// TODO: Change to enum (+ use magic_enum library?)
+		constexpr std::array<const char*, 5> randModes{ "Off", "WorldActive", "World", "AnyActive", "Any" };
+		int randSelection = randMode;
+		if (ImGui::Combo("Random map (PH/TA only)", &randSelection, randModes.data(), randModes.size()))
+		{
+			randMode = randSelection;
+		}
+		if ((randMode == 1) && (selectedWorld.GetActiveLevelCount() == 0))
+		{
+			ImGui::TextDisabled("WorldActive pool empty (0 maps) -- random falls through");
+		}
+
+		// World selection dropdown
+		if (ImGui::BeginCombo("##world", selectedWorld.name.c_str()))
+		{
+			for (const auto [i, world] : worlds | std::ranges::views::enumerate)
 			{
-				bool s = ImGui::Selectable(worlds[i].name.c_str(), selectedWorldIndex == i);
-				if (s) selectedWorldIndex = i;
+				if (ImGui::Selectable(world.name.c_str(), selectedWorldIndex == i))
+				{
+					selectedWorldIndex = i;
+				}
 			}
 			ImGui::EndCombo();
 		}
 		ImGui::Spacing();
-		/* global actions (all worlds) */
-		if (ImGui::Button("Open res folder"))
+
+		ImGui::BeginChild("##files", ImVec2{0, 0}, ImGuiChildFlags_Border | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_NavFlattened);
+		for (Level& level : selectedWorld.levels)
 		{
-			std::string resourcesPathString = mod::resourcesPath.string();
-			ShellExecuteA(NULL, "open", resourcesPathString.c_str(), NULL, NULL, SW_SHOWNORMAL);
-			mod::Log(module, "opened res folder {}", resourcesPathString);
-		}
-		ImGui::SameLine();
-		if (ImGui::Button("Reset All Worlds"))
-			SetAllLevelsActive(true);
-		ImGui::SameLine();
-		if (ImGui::Button("Clear All Worlds"))
-			SetAllLevelsActive(false);
-		ImGui::Spacing();
-		ImGui::BeginChild("##files", ImVec2(0, 300), true);
-		for (size_t j = 0; j < sel.levels.size(); j++)
-		{
-			if (ImGui::Checkbox(sel.levels[j].name.c_str(), &sel.levels[j].active))
+			if (ImGui::Checkbox(level.name.c_str(), &level.active))
 			{
-				sel.UpdateSlots();
+				selectedWorld.UpdateSlots();
 			}
 			ImGui::SameLine();
-			ImGui::TextDisabled("%s", sel.levels[j].gamePath.c_str());
+			ImGui::TextDisabled("%s", level.gamePath.c_str());
 			ImGui::SameLine();
-			ImGui::TextDisabled(sel.levels[j].active ? "[slot %d]" : "[off]", sel.levels[j].slot);
+			ImGui::TextDisabled((level.active ? "[slot %d]" : "[off]"), level.slot);
 		}
 		ImGui::EndChild();
-		int activeCountRaw = sel.GetActiveLevelCount();
-		int activeCount = sel.GetActiveLevelCount();
-		char hint[112] = "";
-		if (activeCountRaw == 0) snprintf(hint, sizeof hint, "  (0 maps -- crash expected, below walk minimum)");
-		else if (activeCountRaw == 1) snprintf(hint, sizeof hint, "  (1 map -> faked to 2)");
-		else if (activeCountRaw > poolCap) snprintf(hint, sizeof hint, " (only the first %d slots will be used in Pilot Hunters or Team Annihilation)", poolCap);
-		ImGui::Text("active count: %d%s", activeCount, hint);
+
+		int activeCount = selectedWorld.GetActiveLevelCount();
+		std::string context;
+		if (activeCount == 0)
+		{
+			context = "(0 maps -- crash expected, below walk minimum)";
+		}
+		else if (activeCount == 1)
+		{
+			context = "(1 map -> faked to 2)";
+		}
+		else if (activeCount > poolCap)
+		{
+			context = std::format("(only the first {} slots will be used in Pilot Hunters or Team Annihilation)", poolCap);
+		}
+		ImGui::Text("active count: %d %s", activeCount, context.c_str());
+
 		if (ImGui::Button("Select All"))
 		{
-			sel.SetAllLevelsActive(true);
+			selectedWorld.SetAllLevelsActive(true);
 		}
 		ImGui::SameLine();
 		if (ImGui::Button("Clear Selection"))
 		{
-			sel.SetAllLevelsActive(false);
+			selectedWorld.SetAllLevelsActive(false);
 		}
-
-		/* random-map selection (PH/TA loads only; deathmatch / cash grab /
-		   deathmatch preview are excluded in GetLevelRemap) */
-		const char* kRandModes[] = {"Off", "WorldActive", "World", "AnyActive", "Any"};
-		int randSel = randMode;
-		if (ImGui::Combo("Random map (PH/TA only)", &randSel, kRandModes, 5))
-			randMode = randSel;
-		if (randMode == 1 && activeCount == 0)
-			ImGui::TextDisabled("WorldActive pool empty (0 maps) -- random falls through");
 	}
 }
 
 void level_pool::Init()
 {
+	// Default initialize worldIndexByType to invalid value -1
+	worldIndexByType.fill(-1);
+
 	PoolInit();
-	InterlockedExchange(&poolReady, 1); // TODO: Refactor to use stl
+
+	InterlockedExchange(&poolReady, 1); //: Refactor to use stl
 }
 
-/* the count the game actually sees: a single-map world is faked to 2,
-   because the walk's exhaust path is an assert (K must be >= 2). Both
-   nums (1 and 2) resolve to the lone active file in GetLevelRemap. */
-int level_pool::GetActiveLevelCountForType(int worldType)
+const char* level_pool::WorldTypeToName(int worldType)
 {
-	if (auto worldOption = GetWorldForType(worldType))
-	{
-		World& world = *worldOption;
-		int activeLevelCount = world.GetActiveLevelCount();
-		return (activeLevelCount == 1) ? 2 : activeLevelCount;
-	}
-
-	return 0;
-}
-
-/* ------------------------------------------------------------------ */
-/* world names (log labels)                                            */
-/* ------------------------------------------------------------------ */
-
-const char* level_pool::WorldIdToName(int id)
-{
-	const char* names[maxWorldId] = {
+	const char* names[maxWorldType] = {
 		"", "mines", "frontier", "flare", "darklab", "echocity", "highrise",
 		"sunken", "graveyard", "gasrigs", "moonbase", "urspace", "void",
 		"legacy", "up", "unsorted"
 	};
-	return (id >= 1 && id < maxWorldId) ? names[id] : "?";
+	return ((worldType >= 1) && (worldType < maxWorldType)) ? names[worldType] : "?";
 }
 
-int level_pool::WorldNameToId(const std::string& name)
+int level_pool::WorldNameToType(const std::string& name)
 {
-	for (int i = 1; i < maxWorldId; i++)
+	for (int i = 1; i < maxWorldType; ++i)
 	{
-		if (strcmp(WorldIdToName(i), name.c_str()) == 0)
+		if (strcmp(WorldTypeToName(i), name.c_str()) == 0)
 		{
 			return i;
 		}
 	}
 
 	return 0;
+}
+
+std::optional<std::reference_wrapper<const level_pool::World>> level_pool::GetWorldByType(int worldType)
+{
+	if ((worldType < 1) || worldType >= maxWorldType)
+	{
+		return std::nullopt;
+	}
+
+	int worldIndex = worldIndexByType[worldType];
+	if (worldIndex < 0)
+	{
+		return std::nullopt;
+	}
+
+	return worlds[worldIndex];
 }

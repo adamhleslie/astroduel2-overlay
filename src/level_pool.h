@@ -1,5 +1,6 @@
 #pragma once
 
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -29,24 +30,26 @@ namespace level_pool
 		int UpdateSlots();
 		void SetAllLevelsActive(bool active);
 		int GetActiveLevelCount() const;
+		int GetGameLevelCount() const; // TODO: Rename this
 
-		int id;
+		int type;
 		std::string name;
 		std::vector<Level> levels;
 	};
 
 	void Init();
 	void DrawUi();
-	int GetActiveLevelCountForType(int worldType);
-	const char* WorldIdToName(int id);
-	int WorldNameToId(const std::string& name);
+	const char* WorldTypeToName(int worldType);
+	int WorldNameToType(const std::string& name);
 
-	extern std::vector<World> worlds;
+	std::optional<std::reference_wrapper<const World>> GetWorldByType(int worldType);
+
 	extern volatile long poolReady;
-
-	constexpr int maxWorldId = 16; /* world ids 1..15 */
-	constexpr int poolCap = 12; /* reachable ceiling: the walk pool only ever emits 1..12 */
-	extern int poolWorldById[maxWorldId]; // TODO: User std::array
-
 	extern volatile int randMode;
+
+	// TODO: Move these to a Game Constants header / namespace
+	// TODO: Refactor world type to enum
+	// TODO: Add Min World Type as well
+	constexpr int maxWorldType = 16; // world types 1..15
+	constexpr int poolCap = 12; // reachable ceiling: the walk pool only ever emits 1..12
 }

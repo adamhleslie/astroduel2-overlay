@@ -67,11 +67,12 @@ static void* GetWorldDataHook(void* out, int worldType)
 	void* r = ((FnGetWorldData) getWorldDataOrig)(out, worldType);
 	int* f = (int*) r; /* f[0..3] = d0,d1,d2,d3 */
 	const int stock = f[3];
-	const int ov = level_pool::GetActiveLevelCountForType(worldType);
-	if (ov) f[3] = ov;
+	auto worldOpt = level_pool::GetWorldByType(worldType);
+	int override = (worldOpt ? worldOpt->get().GetActiveLevelCount() : 0);
+	if (override > 0) f[3] = override;
 	mod::Log(worldDataModule, "world={}({}) out={} cnt={} (stock {}){} ra0={:#010X}",
-	         worldType, level_pool::WorldIdToName(worldType), r, f[3], stock,
-	         ov ? " OVERRIDDEN" : "",(uint32_t) ((uintptr_t) _ReturnAddress() - mod::ad2ModuleBase));
+	         worldType, level_pool::WorldTypeToName(worldType), r, f[3], stock,
+	         override ? " OVERRIDDEN" : "",(uint32_t) ((uintptr_t) _ReturnAddress() - mod::ad2ModuleBase));
 	return r;
 }
 
@@ -189,29 +190,35 @@ static int RandBelow(int n)
  * otherwise fills *out with a uniformly random candidate's full relative
  * path ("levels/versus/<world>/<file>") -- the world in the path may differ
  * from the one being loaded (Any/AnyActive). */
-static bool PoolRandPick(int mode, int world, std::string* out)
+static bool PoolRandPick(int mode, int worldType, std::string* out)
 {
 	if (mode < 1 || mode > 4) return false;
 	/* candidate = (world dir, file name) references into the cache; the
 	   relative path is built once, only for the picked entry. */
 	std::vector<std::pair<const std::string*, const std::string*> > c;
-	auto add = [&](int w, bool active_only)
+	auto add = [&](int type, bool active_only)
 	{
-		int idx = level_pool::poolWorldById[w];
-		if (idx < 0) return;
-		const level_pool::World& pw = level_pool::worlds[idx];
-		for (const level_pool::Level& f: pw.levels)
-			if (!active_only || f.active) c.emplace_back(&pw.name, &f.name);
+		if (auto worldOpt = level_pool::GetWorldByType(type))
+		{
+			const level_pool::World& world = *worldOpt;
+			for (const level_pool::Level& level : world.levels)
+			{
+				if (!active_only || level.active)
+				{
+					c.emplace_back(&world.name, &level.name);
+				}
+			}
+		}
 	};
 	switch (mode)
 	{
-		case 1: add(world, true);
+		case 1: add(worldType, true);
 			break; /* WorldActive */
-		case 2: add(world, false);
+		case 2: add(worldType, false);
 			break; /* World       */
-		case 3: for (int w = 1; w < level_pool::maxWorldId; w++) add(w, true);
+		case 3: for (int w = 1; w < level_pool::maxWorldType; w++) add(w, true);
 			break; /* AnyActive */
-		case 4: for (int w = 1; w < level_pool::maxWorldId; w++) add(w, false);
+		case 4: for (int w = 1; w < level_pool::maxWorldType; w++) add(w, false);
 			break; /* Any       */
 	}
 	if (c.empty()) return false;
@@ -242,62 +249,63 @@ static bool PoolRandPick(int mode, int world, std::string* out)
    Rewrites via assign() on the game's 32-byte std::string (layout proven from
    its own copy-ctor FUN_140008700 / dtor FUN_140003000; shared UCRT heap,
    so assign() may realloc safely). */
-static void GetLevelRemap(void* out, int world, int num, int pick, int mode)
+static void GetLevelRemap(void* out, int worldType, int num, int pick, int mode)
 {
 	if (!level_pool::poolReady || !out) return;
 	if (pick == 3) return; /* cash grab */
-	if (world < 1 || world >= level_pool::maxWorldId) return; /* not pooled */
-	int idx = level_pool::poolWorldById[world];
-	if (idx < 0) return;
-	const level_pool::World& w = level_pool::worlds[idx];
-
-	/* random map selection -- PH/TA loads only (deathmatch and its UI
-	   preview take the normal slot remap below). Off mode or an empty
-	   candidate pool: fall through. */
-	if (pick != 2 && mode != 1)
+	if (worldType < 1 || worldType >= level_pool::maxWorldType) return; /* not pooled */
+	if (auto worldOpt = level_pool::GetWorldByType(worldType))
 	{
-		std::string rpath;
-		if (PoolRandPick(level_pool::randMode, world, &rpath))
+		const level_pool::World& world = *worldOpt;
+
+		/* random map selection -- PH/TA loads only (deathmatch and its UI
+		preview take the normal slot remap below). Off mode or an empty
+		candidate pool: fall through. */
+		if (pick != 2 && mode != 1)
 		{
-			reinterpret_cast<std::string*>(out)->assign(rpath);
-			mod::Log(levelModule, "RAND mode={} world={}({}) num={} -> {}", static_cast<int>(level_pool::randMode), world, level_pool::WorldIdToName(world), num, rpath);
+			std::string rpath;
+			if (PoolRandPick(level_pool::randMode, worldType, &rpath))
+			{
+				reinterpret_cast<std::string*>(out)->assign(rpath);
+				mod::Log(levelModule, "RAND mode={} world={}({}) num={} -> {}", static_cast<int>(level_pool::randMode), worldType, level_pool::WorldTypeToName(worldType), num, rpath);
+				return;
+			}
+		}
+
+		const level_pool::Level* pf = nullptr;
+		for (size_t j = 0; j < world.levels.size(); j++)
+			if (world.levels[j].slot == num)
+			{
+				pf = &world.levels[j];
+				break;
+			}
+		if (!pf)
+		{
+			/* single-map world: count is faked to 2, so num may be 2 with only
+			   slot 1 populated -- resolve any in-range num to the lone file */
+			int act = 0;
+			const level_pool::Level* only = nullptr;
+			for (const level_pool::Level& f: world.levels)
+				if (f.active)
+				{
+					act++;
+					only = &f;
+				}
+			if (act == 1) pf = only;
+		}
+		if (!pf)
+		{
+			mod::Log(levelModule, "REMAP MISS - world={}({}) num={} - no slot (outside active pool)", worldType, level_pool::WorldTypeToName(worldType), num);
 			return;
 		}
+		char ident[48];
+		snprintf(ident, sizeof ident, "%s%d.tmx", level_pool::WorldTypeToName(worldType), num);
+		if (strcmp(pf->name.c_str(), ident) == 0) return; /* identity: file IS slot num */
+		char np[192];
+		snprintf(np, sizeof np, "levels/versus/%s/%s", world.name.c_str(), pf->name.c_str());
+		reinterpret_cast<std::string*>(out)->assign(np, strlen(np));
+		mod::Log(levelModule, "REMAP - world={}({}) slot={} {} -> {}", worldType, level_pool::WorldTypeToName(worldType), num, ident, pf->name.c_str());
 	}
-
-	const level_pool::Level* pf = nullptr;
-	for (size_t j = 0; j < w.levels.size(); j++)
-		if (w.levels[j].slot == num)
-		{
-			pf = &w.levels[j];
-			break;
-		}
-	if (!pf)
-	{
-		/* single-map world: count is faked to 2, so num may be 2 with only
-		   slot 1 populated -- resolve any in-range num to the lone file */
-		int act = 0;
-		const level_pool::Level* only = nullptr;
-		for (const level_pool::Level& f: w.levels)
-			if (f.active)
-			{
-				act++;
-				only = &f;
-			}
-		if (act == 1) pf = only;
-	}
-	if (!pf)
-	{
-		mod::Log(levelModule, "REMAP MISS - world={}({}) num={} - no slot (outside active pool)", world, level_pool::WorldIdToName(world), num);
-		return;
-	}
-	char ident[48];
-	snprintf(ident, sizeof ident, "%s%d.tmx", level_pool::WorldIdToName(world), num);
-	if (strcmp(pf->name.c_str(), ident) == 0) return; /* identity: file IS slot num */
-	char np[192];
-	snprintf(np, sizeof np, "levels/versus/%s/%s", w.name.c_str(), pf->name.c_str());
-	reinterpret_cast<std::string*>(out)->assign(np, strlen(np));
-	mod::Log(levelModule, "REMAP - world={}({}) slot={} {} -> {}", world, level_pool::WorldIdToName(world), num, ident, pf->name.c_str());
 }
 
 static void* GetLevelHook(void* out, int world, int num, char mode)
@@ -324,7 +332,7 @@ static void* GetLevelHook(void* out, int world, int num, char mode)
 	char path[160];
 	PeekStdString(out, path, sizeof(path)); /* post-rewrite: the final path */
 	mod::Log(levelModule, "world={}({}) num={} mode={} pick={} spec={} cnt={} path=\"{}\" ret={} ra0={:#010X}",
-	         world, level_pool::WorldIdToName(world), num, (int) mode, pick, spec, cnt, path, ret,
+	         world, level_pool::WorldTypeToName(world), num, (int) mode, pick, spec, cnt, path, ret,
 	         (uint32_t) ((uintptr_t) _ReturnAddress() - mod::ad2ModuleBase));
 	return ret;
 }
