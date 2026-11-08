@@ -5,6 +5,7 @@
 #include <intrin.h>    /* _ReturnAddress() -- hook caller forensics (x64 C++ intrinsic) */
 #include <string>
 #include <vector>
+#include <enchantum/std_format.hpp>
 
 #include "mod.h"
 #include "level_pool.h"
@@ -67,11 +68,12 @@ static void* GetWorldDataHook(void* out, int worldType)
 	void* r = ((FnGetWorldData) getWorldDataOrig)(out, worldType);
 	int* f = (int*) r; /* f[0..3] = d0,d1,d2,d3 */
 	const int stock = f[3];
-	auto worldOpt = level_pool::GetWorldByType(worldType);
+	ad2::WorldType type = static_cast<ad2::WorldType>(worldType);
+	auto worldOpt = level_pool::GetWorldByType(type);
 	int override = (worldOpt ? worldOpt->get().GetActiveLevelCount() : 0);
 	if (override > 0) f[3] = override;
 	mod::Log(worldDataModule, "world={}({}) out={} cnt={} (stock {}){} ra0={:#010X}",
-	         worldType, level_pool::WorldTypeToName(worldType), r, f[3], stock,
+	         worldType, ad2::ToWorldType(worldType), r, f[3], stock,
 	         override ? " OVERRIDDEN" : "",(uint32_t) ((uintptr_t) _ReturnAddress() - mod::ad2ModuleBase));
 	return r;
 }
@@ -186,45 +188,54 @@ static int RandBelow(int n)
 }
 
 /* Random-map candidate pick for one PH/TA load. Returns false (caller runs
- * the normal slot/identity logic) for Off mode or an empty candidate pool;
+ * the normal slot/identity logic) for Off randMode or an empty candidate pool;
  * otherwise fills *out with a uniformly random candidate's full relative
  * path ("levels/versus/<world>/<file>") -- the world in the path may differ
  * from the one being loaded (Any/AnyActive). */
-static bool PoolRandPick(int mode, int worldType, std::string* out)
+static bool PoolRandPick(int randMode, const level_pool::World& world, std::string* out)
 {
-	if (mode < 1 || mode > 4) return false;
-	/* candidate = (world dir, file name) references into the cache; the
-	   relative path is built once, only for the picked entry. */
-	std::vector<std::pair<const std::string*, const std::string*> > c;
-	auto add = [&](int type, bool active_only)
+	if (randMode < 1 || randMode > 4)
 	{
-		if (auto worldOpt = level_pool::GetWorldByType(type))
+		return false;
+	}
+
+	// candidate = (world dir, file name) references into the cache; the relative path is built once, only for the picked entry.
+	std::vector<std::pair<const std::string*, const std::string*>> c;
+	auto addLevels = [&c](std::optional<std::reference_wrapper<const level_pool::World>> worldOpt, bool activeOnly)
+	{
+		if (worldOpt)
 		{
 			const level_pool::World& world = *worldOpt;
 			for (const level_pool::Level& level : world.levels)
 			{
-				if (!active_only || level.active)
+				if (!activeOnly || level.active)
 				{
 					c.emplace_back(&world.name, &level.name);
 				}
 			}
 		}
 	};
-	switch (mode)
+
+	switch (randMode)
 	{
-		case 1: add(worldType, true);
+		case 1: addLevels(world, true);
 			break; /* WorldActive */
-		case 2: add(worldType, false);
+		case 2: addLevels(world, false);
 			break; /* World       */
-		case 3: for (int w = 1; w < level_pool::maxWorldType; w++) add(w, true);
+		case 3: for (ad2::WorldType worldType : enchantum::values_generator<ad2::WorldType>) addLevels(level_pool::GetWorldByType(worldType), true);
 			break; /* AnyActive */
-		case 4: for (int w = 1; w < level_pool::maxWorldType; w++) add(w, false);
+		case 4: for (ad2::WorldType worldType : enchantum::values_generator<ad2::WorldType>) addLevels(level_pool::GetWorldByType(worldType), false);
 			break; /* Any       */
 	}
-	if (c.empty()) return false;
-	const auto& pick = c[RandBelow((int) c.size())];
-	*out = "levels/versus/" + *pick.first + "/" + *pick.second;
-	return true;
+
+	if (!c.empty())
+	{
+		const auto& pick = c[RandBelow((int) c.size())];
+		*out = "levels/versus/" + *pick.first + "/" + *pick.second;
+		return true;
+	}
+
+	return false;
 }
 
 /* glv remap (stage 2): the composer built levels/versus/<world>/<world><num>.tmx
@@ -253,7 +264,7 @@ static void GetLevelRemap(void* out, int worldType, int num, int pick, int mode)
 {
 	if (!level_pool::poolReady || !out) return;
 	if (pick == 3) return; /* cash grab */
-	if (worldType < 1 || worldType >= level_pool::maxWorldType) return; /* not pooled */
+
 	if (auto worldOpt = level_pool::GetWorldByType(worldType))
 	{
 		const level_pool::World& world = *worldOpt;
@@ -264,10 +275,10 @@ static void GetLevelRemap(void* out, int worldType, int num, int pick, int mode)
 		if (pick != 2 && mode != 1)
 		{
 			std::string rpath;
-			if (PoolRandPick(level_pool::randMode, worldType, &rpath))
+			if (PoolRandPick(level_pool::randMode, world, &rpath))
 			{
 				reinterpret_cast<std::string*>(out)->assign(rpath);
-				mod::Log(levelModule, "RAND mode={} world={}({}) num={} -> {}", static_cast<int>(level_pool::randMode), worldType, level_pool::WorldTypeToName(worldType), num, rpath);
+				mod::Log(levelModule, "RAND mode={} world={}({}) num={} -> {}", static_cast<int>(level_pool::randMode), worldType, world.type, num, rpath);
 				return;
 			}
 		}
@@ -295,22 +306,22 @@ static void GetLevelRemap(void* out, int worldType, int num, int pick, int mode)
 		}
 		if (!pf)
 		{
-			mod::Log(levelModule, "REMAP MISS - world={}({}) num={} - no slot (outside active pool)", worldType, level_pool::WorldTypeToName(worldType), num);
+			mod::Log(levelModule, "REMAP MISS - world={}({}) num={} - no slot (outside active pool)", worldType, world.type, num);
 			return;
 		}
 		char ident[48];
-		snprintf(ident, sizeof ident, "%s%d.tmx", level_pool::WorldTypeToName(worldType), num);
+		snprintf(ident, sizeof ident, "%s%d.tmx", world.name.c_str(), num);
 		if (strcmp(pf->name.c_str(), ident) == 0) return; /* identity: file IS slot num */
 		char np[192];
 		snprintf(np, sizeof np, "levels/versus/%s/%s", world.name.c_str(), pf->name.c_str());
 		reinterpret_cast<std::string*>(out)->assign(np, strlen(np));
-		mod::Log(levelModule, "REMAP - world={}({}) slot={} {} -> {}", worldType, level_pool::WorldTypeToName(worldType), num, ident, pf->name.c_str());
+		mod::Log(levelModule, "REMAP - world={}({}) slot={} {} -> {}", worldType, world.type, num, ident, pf->name.c_str());
 	}
 }
 
-static void* GetLevelHook(void* out, int world, int num, char mode)
+static void* GetLevelHook(void* out, int worldType, int num, char mode)
 {
-	void* ret = getLevelOrig ? ((FnGetLevel) getLevelOrig)(out, world, num, mode) : nullptr;
+	void* ret = getLevelOrig ? ((FnGetLevel) getLevelOrig)(out, worldType, num, mode) : nullptr;
 	if (!getLevelOrig)
 	{
 		mod::Log(levelModule, "FATAL - no trampoline; composer NOT run");
@@ -328,11 +339,11 @@ static void* GetLevelHook(void* out, int world, int num, char mode)
 		uintptr_t s = *(volatile uintptr_t*) (b + 0x5DE9C8); /* singleton */
 		if (s >= 0x10000) spec = (int) *(volatile int32_t*) (s + 0x45C);
 	}
-	GetLevelRemap(out, world, num, pick, mode); /* slot -> file (stage 2); logs on rewrite/miss */
+	GetLevelRemap(out, worldType, num, pick, mode); /* slot -> file (stage 2); logs on rewrite/miss */
 	char path[160];
 	PeekStdString(out, path, sizeof(path)); /* post-rewrite: the final path */
 	mod::Log(levelModule, "world={}({}) num={} mode={} pick={} spec={} cnt={} path=\"{}\" ret={} ra0={:#010X}",
-	         world, level_pool::WorldTypeToName(world), num, (int) mode, pick, spec, cnt, path, ret,
+	         worldType, ad2::ToWorldType(worldType), num, (int) mode, pick, spec, cnt, path, ret,
 	         (uint32_t) ((uintptr_t) _ReturnAddress() - mod::ad2ModuleBase));
 	return ret;
 }

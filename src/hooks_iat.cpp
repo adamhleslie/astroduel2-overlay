@@ -8,8 +8,8 @@
 
 namespace
 {
-	constexpr std::string module = "iat-hook";
-	constexpr std::string gameModule = "game";
+	constexpr std::string category = "iat-hook";
+	constexpr std::string gameCategory = "game";
 
 	constexpr uintptr_t iatRegionStart = 0x47e000;
 	constexpr uintptr_t iatRegionEnd = 0x495a00;
@@ -39,14 +39,14 @@ namespace
 										DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes, HANDLE hTemplateFile)
 	{
 		HANDLE result = createFileWOrig(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
-		mod::Log(gameModule, "CreateFileW {} (result={}, error={})", LPCWSTRToString(lpFileName), result, GetLastError());
+		mod::Log(gameCategory, "CreateFileW {} (result={}, error={})", LPCWSTRToString(lpFileName), result, GetLastError());
 		return result;
 	}
 
 	DWORD WINAPI GetFileAttributesWHook(LPCWSTR lpFileName)
 	{
 		DWORD result = getFileAttributesWOrig(lpFileName);
-		mod::Log(gameModule, "GetFileAttributesW {} (result={:#x}{}, error={})", LPCWSTRToString(lpFileName), result, (result == INVALID_FILE_ATTRIBUTES ? " NOT-FOUND" : ""), GetLastError());
+		mod::Log(gameCategory, "GetFileAttributesW {} (result={:#x}{}, error={})", LPCWSTRToString(lpFileName), result, (result == INVALID_FILE_ATTRIBUTES ? " NOT-FOUND" : ""), GetLastError());
 		return result;
 	}
 
@@ -62,11 +62,11 @@ namespace
 		HRESULT result = shellGetKnownFolderOrig(rfid, dwFlags, hToken, ppszPath);
 		if (result == S_OK && ppszPath && *ppszPath)
 		{
-			mod::Log(gameModule, "SHGetKnownFolderPath {} -> {}", guidString, LPCWSTRToString(*ppszPath));
+			mod::Log(gameCategory, "SHGetKnownFolderPath {} -> {}", guidString, LPCWSTRToString(*ppszPath));
 		}
 		else
 		{
-			mod::Log(gameModule, "SHGetKnownFolderPath {} FAILED hr={:#010X}", guidString, static_cast<unsigned long>(result));
+			mod::Log(gameCategory, "SHGetKnownFolderPath {} FAILED hr={:#010X}", guidString, static_cast<unsigned long>(result));
 		}
 
 		return result;
@@ -77,7 +77,7 @@ namespace
 	{
 		if (!address)
 		{
-			mod::Log(module, " {} - address is null", name);
+			mod::Log(category, " {} - address is null", name);
 			return false;
 		}
 
@@ -91,16 +91,16 @@ namespace
 				DWORD oldProtect = 0;
 				if (!VirtualProtect(slotAddress, 8, newProtect, &oldProtect))
 				{
-					mod::Log(module, " {} - VirtualProtect FAILED {}", name, GetLastError());
+					mod::Log(category, " {} - VirtualProtect FAILED {}", name, GetLastError());
 					return false;
 				}
 				*slotAddress = hookAddress;
 				VirtualProtect(slotAddress, 8, oldProtect, &newProtect);
-				mod::Log(module, " {} - PATCHED slot @base0x+{:x} (orig={})", name, static_cast<unsigned>(slotOffset), reinterpret_cast<void*>(address));
+				mod::Log(category, " {} - PATCHED slot @base0x+{:x} (orig={})", name, static_cast<unsigned>(slotOffset), reinterpret_cast<void*>(address));
 				return true;
 			}
 		}
-		mod::Log(module, " {} - slot NOT FOUND in IAT {:#x}..{:#x}", name, static_cast<unsigned>(iatRegionStart), static_cast<unsigned>(iatRegionEnd));
+		mod::Log(category, " {} - slot NOT FOUND in IAT {:#x}..{:#x}", name, static_cast<unsigned>(iatRegionStart), static_cast<unsigned>(iatRegionEnd));
 		return false;
 	}
 
@@ -135,6 +135,6 @@ void hooks::iat::InstallHooks()
 	HookIatForKernelDll("CreateFileW", CreateFileWHook, createFileWOrig);
 	HookIatForKernelDll("GetFileAttributesW", GetFileAttributesWHook, getFileAttributesWOrig);
 	HookIatForModule("shell32.dll", "SHGetKnownFolderPath", ShellGetKnownFolderPathHook, shellGetKnownFolderOrig);
-	mod::Log(module, " Original Addresses - createFileW={} getFileAttributesW={} getKnownFolderPath={}",
+	mod::Log(category, " Original Addresses - createFileW={} getFileAttributesW={} getKnownFolderPath={}",
 		reinterpret_cast<void*>(createFileWOrig), reinterpret_cast<void*>(getFileAttributesWOrig), reinterpret_cast<void*>(shellGetKnownFolderOrig));
 }

@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <ranges>
 #include <shellapi.h>
+#include <enchantum/array.hpp>
 
 volatile long level_pool::poolReady = 0; /* cache + draft built */
 /* Random-map selection (render thread writes on combo change; game thread
@@ -22,19 +23,16 @@ volatile int level_pool::randMode = 0;
 namespace
 {
 	constexpr std::string module = "level-pool";
-	size_t selectedWorldIndex = 0;
-
-	// extern globals
 	std::vector<level_pool::World> worlds;
-	std::array<int, level_pool::maxWorldType> worldIndexByType; /* index into worlds, -1 = none */
+	enchantum::array<ad2::WorldType, size_t> worldIndexByType; // index into worlds, (size_t)-1 is invalid
+	size_t selectedWorldIndex = 0;
 
 	bool EqualsCaseInsensitive(const std::string& a, const std::string& b)
 	{
-		return std::ranges::equal(a, b,
-			[](char c1, char c2)
-			{
-				return std::tolower(static_cast<unsigned char>(c1)) == std::tolower(static_cast<unsigned char>(c2));
-			});
+		return std::ranges::equal(a, b, [](char c1, char c2)
+		{
+			return std::tolower(static_cast<unsigned char>(c1)) == std::tolower(static_cast<unsigned char>(c2));
+		});
 	}
 
 	// Extracts the trailing number of a map filename for the specified world ("mines12.tmx" -> 12), -1 if none
@@ -125,19 +123,19 @@ namespace
 		worlds.push_back(world);
 
 		// Cache mapping from world type to world index
-		if ((world.type >= 1) && (world.type < level_pool::maxWorldType))
+		if (enchantum::contains(world.type))
 		{
-			worldIndexByType[world.type] = static_cast<int>(worldIndex);
+			worldIndexByType[world.type] = worldIndex;
 		}
 
 		if (world.levels.size() < 2)
 		{
 			mod::Log(module, "WARNING {}: only {} level(s) found (< 2) - {}",
-				world.name, world.levels.size(), activeCount, activeCount == 1 ? "pool count faked to 2 (single-map mode)" : "crash expected");
+				world.name, world.levels.size(), activeCount, (activeCount == 1 ? "pool count faked to 2 (single-map mode)" : "crash expected"));
 		}
 
 		mod::Log(module, "{}: {} levels in pool ({} cash grab maps skipped){}",
-			world.name, world.levels.size(), cashGrabLevels, (world.type < 1) ? " [worldType unknown, not applied]" : "");
+			world.name, world.levels.size(), cashGrabLevels, (!enchantum::contains(world.type)) ? " [worldType unknown, will be unused]" : "");
 	}
 
 	void PoolInit()
@@ -155,17 +153,17 @@ namespace
 			return;
 		}
 
-		int worlds = 0;
+		int worldCount = 0;
 		for (auto& directoryEntry : std::filesystem::directory_iterator(versusLevelsPath, std::filesystem::directory_options::skip_permission_denied))
 		{
 			if (directoryEntry.is_directory())
 			{
 				AddWorld(directoryEntry.path());
-				++worlds;
+				++worldCount;
 			}
 		}
 
-		mod::Log(module, "{} worlds found under {}", worlds, versusLevelsPath.string());
+		mod::Log(module, "{} worlds found under {}", worldCount, versusLevelsPath.string());
 	}
 
 	// Set every level to an active state and applies in one shot
@@ -183,7 +181,7 @@ namespace
 #pragma region World
 
 level_pool::World::World(std::string name, const std::vector<std::string>& levelNames)
-	: type{WorldNameToType(name)}
+	: type{ad2::WorldNameToType(name)}
 	, name{std::move(name)}
 	, levels{levelNames.size()}
 {
@@ -241,7 +239,7 @@ int level_pool::World::GetActiveLevelCount() const
 /* the count the game actually sees: a single-map world is faked to 2,
    because the walk's exhaust path is an assert (K must be >= 2). Both
    nums (1 and 2) resolve to the lone active file in GetLevelRemap. */
-int level_pool::World::GetGameLevelCount() const
+int level_pool::World::GetLevelCountForGame() const
 {
 	int activeLevelCount = GetActiveLevelCount();
 	return (activeLevelCount == 1) ? 2 : activeLevelCount;
@@ -334,9 +332,9 @@ void level_pool::DrawUi()
 		{
 			context = "(1 map -> faked to 2)";
 		}
-		else if (activeCount > poolCap)
+		else if (activeCount > ad2::levelPoolCap)
 		{
-			context = std::format("(only the first {} slots will be used in Pilot Hunters or Team Annihilation)", poolCap);
+			context = std::format("(only the first {} slots will be used in Pilot Hunters or Team Annihilation)", ad2::levelPoolCap);
 		}
 		ImGui::Text("active count: %d %s", activeCount, context.c_str());
 
@@ -354,49 +352,34 @@ void level_pool::DrawUi()
 
 void level_pool::Init()
 {
-	// Default initialize worldIndexByType to invalid value -1
-	worldIndexByType.fill(-1);
+	// Default initialize worldIndexByType to invalid value (size_t)-1
+	worldIndexByType.fill(static_cast<size_t>(-1));
 
 	PoolInit();
 
-	InterlockedExchange(&poolReady, 1); //: Refactor to use stl
+	InterlockedExchange(&poolReady, 1); // TODO: Refactor to use stl
 }
 
-const char* level_pool::WorldTypeToName(int worldType)
+std::optional<std::reference_wrapper<const level_pool::World>> level_pool::GetWorldByType(ad2::WorldType type)
 {
-	const char* names[maxWorldType] = {
-		"", "mines", "frontier", "flare", "darklab", "echocity", "highrise",
-		"sunken", "graveyard", "gasrigs", "moonbase", "urspace", "void",
-		"legacy", "up", "unsorted"
-	};
-	return ((worldType >= 1) && (worldType < maxWorldType)) ? names[worldType] : "?";
-}
-
-int level_pool::WorldNameToType(const std::string& name)
-{
-	for (int i = 1; i < maxWorldType; ++i)
+	if (enchantum::contains(type))
 	{
-		if (strcmp(WorldTypeToName(i), name.c_str()) == 0)
+		size_t index = worldIndexByType[type];
+		if (index != static_cast<size_t>(-1))
 		{
-			return i;
+			return worlds[index];
 		}
 	}
 
-	return 0;
+	return std::nullopt;
 }
 
-std::optional<std::reference_wrapper<const level_pool::World>> level_pool::GetWorldByType(int worldType)
+std::optional<std::reference_wrapper<const level_pool::World>> level_pool::GetWorldByType(std::underlying_type_t<ad2::WorldType> underlyingType)
 {
-	if ((worldType < 1) || worldType >= maxWorldType)
+	if (auto typeOpt = enchantum::cast<ad2::WorldType>(underlyingType))
 	{
-		return std::nullopt;
+		return GetWorldByType(*typeOpt);
 	}
 
-	int worldIndex = worldIndexByType[worldType];
-	if (worldIndex < 0)
-	{
-		return std::nullopt;
-	}
-
-	return worlds[worldIndex];
+	return std::nullopt;
 }

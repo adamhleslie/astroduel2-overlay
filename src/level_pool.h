@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 
+#include "ad2.h"
+
 /* versus level pool - per-world level loading and pool customization
  *
  * Built once at startup: enumerates every subdirectory of <resources>/levels/versus
@@ -30,26 +32,19 @@ namespace level_pool
 		int UpdateSlots();
 		void SetAllLevelsActive(bool active);
 		int GetActiveLevelCount() const;
-		int GetGameLevelCount() const; // TODO: Rename this
+		int GetLevelCountForGame() const;
 
-		int type;
+		ad2::WorldType type;
 		std::string name;
 		std::vector<Level> levels;
 	};
 
 	void Init();
 	void DrawUi();
-	const char* WorldTypeToName(int worldType);
-	int WorldNameToType(const std::string& name);
 
-	std::optional<std::reference_wrapper<const World>> GetWorldByType(int worldType);
+	std::optional<std::reference_wrapper<const World>> GetWorldByType(ad2::WorldType type);
+	std::optional<std::reference_wrapper<const World>> GetWorldByType(std::underlying_type_t<ad2::WorldType> underlyingType);
 
 	extern volatile long poolReady;
 	extern volatile int randMode;
-
-	// TODO: Move these to a Game Constants header / namespace
-	// TODO: Refactor world type to enum
-	// TODO: Add Min World Type as well
-	constexpr int maxWorldType = 16; // world types 1..15
-	constexpr int poolCap = 12; // reachable ceiling: the walk pool only ever emits 1..12
 }

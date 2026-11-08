@@ -1,13 +1,20 @@
 #pragma once
 
+#ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <windows.h>
 #include <knownfolders.h>
 #include <shtypes.h>
+#include <filesystem>
 #include <mutex>
 #include <fstream>
 #include <chrono>
+#include <format>
+#include <enchantum/std_format.hpp>
 
 namespace mod
 {
@@ -40,6 +47,7 @@ namespace mod
 		extern std::ofstream logFileStream;
 	}
 
+	// TODO: Replace "module" nomenclature with "category"
 	// Log is called from several threads - file stream must be initialized in mod::Main before any invocations
 	template<typename... Args>
 	void Log(const std::string& module, std::format_string<Args...> fmt, Args&&... args)

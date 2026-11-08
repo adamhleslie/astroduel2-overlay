@@ -23,6 +23,9 @@ if (NOT TARGET minhook)
     message (FATAL_ERROR "minhook library not defined by adding subdirectory external/minhook")
 endif ()
 
+# Enchantum
+add_subdirectory(external/enchantum)
+
 # TODO: Re-implement when cjson needed again
 #add_subdirectory(external/cjson)
 #if (NOT TARGET cjson)
@@ -37,9 +40,12 @@ add_library(steam_api64 SHARED
     src/hooks_iat.cpp
     src/hooks_game.cpp
     src/level_pool.cpp
-    src/overlay.cpp)
+    src/overlay.cpp
+    src/ad2.h
+    src/ad2.cpp)
 
 # TODO: Investigate refactoring to use RtlCaptureStackBackTrace
 # /Oy- (disable frame-pointer omission) for _ReturnAddress() reliability
 target_compile_options(steam_api64 PRIVATE /W3 /utf-8 /Oy-)
-target_link_libraries(steam_api64 PRIVATE imgui minhook opengl32 user32 gdi32 shell32 kernel32)
+target_compile_definitions(steam_api64 PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN) # Windows header include options
+target_link_libraries(steam_api64 PRIVATE imgui minhook enchantum::enchantum opengl32 user32 gdi32 shell32 kernel32)
