@@ -41,10 +41,10 @@ namespace mod
 	const std::wstring logFile = LR"(AstroDuel2\overlay.log)";
 
 	// INTERNAL ONLY - logging values, used by templated Log function below
-	namespace internal
+	namespace detail
 	{
 		extern std::mutex logMutex;
-		extern std::ofstream logFileStream;
+		extern std::ofstream logStream;
 	}
 
 	// TODO: Replace "module" nomenclature with "category"
@@ -52,15 +52,15 @@ namespace mod
 	template<typename... Args>
 	void Log(const std::string& module, std::format_string<Args...> fmt, Args&&... args)
 	{
-		if (!internal::logFileStream.is_open())
+		if (!detail::logStream.is_open())
 		{
-			// Log file not initialized properly
+			// Log file not initialized before call to Log
 			// TODO: Display error in overlay
 			return;
 		}
 
-		std::lock_guard guard{internal::logMutex};
+		std::lock_guard guard{detail::logMutex};
 		auto localTime = std::chrono::current_zone()->to_local(std::chrono::system_clock::now());
-		internal::logFileStream << std::format("[{:%T}] [{}] {}", localTime, module, std::format(fmt, std::forward<Args>(args)...)) << std::endl;
+		detail::logStream << std::format("[{:%T}] [{}] {}", localTime, module, std::format(fmt, std::forward<Args>(args)...)) << std::endl;
 	}
 }

@@ -1,7 +1,5 @@
 #pragma once
 
-#include <string>
-
 #include <enchantum/enchantum.hpp>
 
 namespace ad2
@@ -30,13 +28,6 @@ namespace ad2
 		Up,
 		Unsorted,
 	};
-
-	// Returns Invalid if no value match
-	WorldType ToWorldType(std::underlying_type_t<WorldType> underlyingType);
-
-	// The lower case name used within the game, and for directory path
-	std::string WorldTypeToName(WorldType type);
-	WorldType WorldNameToType(const std::string& name);
 }
 
 template<>

@@ -19,8 +19,8 @@ uintptr_t mod::ad2ModuleBase = 0;
 HINSTANCE mod::dllModule = nullptr;
 std::filesystem::path mod::resourcesPath;
 
-std::mutex mod::internal::logMutex;
-std::ofstream mod::internal::logFileStream;
+std::mutex mod::detail::logMutex;
+std::ofstream mod::detail::logStream;
 
 namespace
 {
@@ -105,8 +105,8 @@ namespace
 			}
 		}
 
-		mod::internal::logFileStream.open(logFilePath, std::ofstream::out | std::ofstream::app);
-		return mod::internal::logFileStream.is_open();
+		mod::detail::logStream.open(logFilePath, std::ofstream::out | std::ofstream::app);
+		return mod::detail::logStream.is_open();
 	}
 }
 

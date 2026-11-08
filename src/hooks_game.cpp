@@ -7,6 +7,7 @@
 #include <vector>
 #include <enchantum/std_format.hpp>
 
+#include "extensions_enchantum.h"
 #include "mod.h"
 #include "level_pool.h"
 
@@ -68,12 +69,12 @@ static void* GetWorldDataHook(void* out, int worldType)
 	void* r = ((FnGetWorldData) getWorldDataOrig)(out, worldType);
 	int* f = (int*) r; /* f[0..3] = d0,d1,d2,d3 */
 	const int stock = f[3];
-	ad2::WorldType type = static_cast<ad2::WorldType>(worldType);
+	ad2::WorldType type = ext::enchantum::cast_or(worldType, ad2::WorldType::Invalid);
 	auto worldOpt = level_pool::GetWorldByType(type);
 	int override = (worldOpt ? worldOpt->get().GetActiveLevelCount() : 0);
 	if (override > 0) f[3] = override;
 	mod::Log(worldDataModule, "world={}({}) out={} cnt={} (stock {}){} ra0={:#010X}",
-	         worldType, ad2::ToWorldType(worldType), r, f[3], stock,
+	         worldType, type, r, f[3], stock,
 	         override ? " OVERRIDDEN" : "",(uint32_t) ((uintptr_t) _ReturnAddress() - mod::ad2ModuleBase));
 	return r;
 }
@@ -192,9 +193,9 @@ static int RandBelow(int n)
  * otherwise fills *out with a uniformly random candidate's full relative
  * path ("levels/versus/<world>/<file>") -- the world in the path may differ
  * from the one being loaded (Any/AnyActive). */
-static bool PoolRandPick(int randMode, const level_pool::World& world, std::string* out)
+static bool PoolRandPick(level_pool::RandMode randMode, const level_pool::World& world, std::string* out)
 {
-	if (randMode < 1 || randMode > 4)
+	if (randMode == level_pool::RandMode::Off)
 	{
 		return false;
 	}
@@ -218,14 +219,14 @@ static bool PoolRandPick(int randMode, const level_pool::World& world, std::stri
 
 	switch (randMode)
 	{
-		case 1: addLevels(world, true);
-			break; /* WorldActive */
-		case 2: addLevels(world, false);
-			break; /* World       */
-		case 3: for (ad2::WorldType worldType : enchantum::values_generator<ad2::WorldType>) addLevels(level_pool::GetWorldByType(worldType), true);
-			break; /* AnyActive */
-		case 4: for (ad2::WorldType worldType : enchantum::values_generator<ad2::WorldType>) addLevels(level_pool::GetWorldByType(worldType), false);
-			break; /* Any       */
+		case level_pool::RandMode::WorldActive: addLevels(world, true);
+			break;
+		case level_pool::RandMode::World: addLevels(world, false);
+			break;
+		case level_pool::RandMode::AnyActive: for (ad2::WorldType worldType : enchantum::values_generator<ad2::WorldType>) addLevels(level_pool::GetWorldByType(worldType), true);
+			break;
+		case level_pool::RandMode::Any: for (ad2::WorldType worldType : enchantum::values_generator<ad2::WorldType>) addLevels(level_pool::GetWorldByType(worldType), false);
+			break;
 	}
 
 	if (!c.empty())
@@ -262,7 +263,7 @@ static bool PoolRandPick(int randMode, const level_pool::World& world, std::stri
    so assign() may realloc safely). */
 static void GetLevelRemap(void* out, int worldType, int num, int pick, int mode)
 {
-	if (!level_pool::poolReady || !out) return;
+	if (!level_pool::isInitialized.load() || !out) return;
 	if (pick == 3) return; /* cash grab */
 
 	if (auto worldOpt = level_pool::GetWorldByType(worldType))
@@ -275,10 +276,11 @@ static void GetLevelRemap(void* out, int worldType, int num, int pick, int mode)
 		if (pick != 2 && mode != 1)
 		{
 			std::string rpath;
-			if (PoolRandPick(level_pool::randMode, world, &rpath))
+			level_pool::RandMode randMode = level_pool::randMode.load();
+			if (PoolRandPick(randMode, world, &rpath))
 			{
 				reinterpret_cast<std::string*>(out)->assign(rpath);
-				mod::Log(levelModule, "RAND mode={} world={}({}) num={} -> {}", static_cast<int>(level_pool::randMode), worldType, world.type, num, rpath);
+				mod::Log(levelModule, "RAND mode={} world={}({}) num={} -> {}", static_cast<int>(randMode), worldType, world.type, num, rpath);
 				return;
 			}
 		}
@@ -343,7 +345,7 @@ static void* GetLevelHook(void* out, int worldType, int num, char mode)
 	char path[160];
 	PeekStdString(out, path, sizeof(path)); /* post-rewrite: the final path */
 	mod::Log(levelModule, "world={}({}) num={} mode={} pick={} spec={} cnt={} path=\"{}\" ret={} ra0={:#010X}",
-	         worldType, ad2::ToWorldType(worldType), num, (int) mode, pick, spec, cnt, path, ret,
+	         worldType, ext::enchantum::cast_or(worldType, ad2::WorldType::Invalid), num, (int) mode, pick, spec, cnt, path, ret,
 	         (uint32_t) ((uintptr_t) _ReturnAddress() - mod::ad2ModuleBase));
 	return ret;
 }

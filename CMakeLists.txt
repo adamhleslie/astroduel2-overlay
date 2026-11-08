@@ -40,9 +40,7 @@ add_library(steam_api64 SHARED
     src/hooks_iat.cpp
     src/hooks_game.cpp
     src/level_pool.cpp
-    src/overlay.cpp
-    src/ad2.h
-    src/ad2.cpp)
+    src/overlay.cpp)
 
 # TODO: Investigate refactoring to use RtlCaptureStackBackTrace
 # /Oy- (disable frame-pointer omission) for _ReturnAddress() reliability
