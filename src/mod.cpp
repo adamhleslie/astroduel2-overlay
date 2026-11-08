@@ -24,8 +24,8 @@ std::ofstream mod::detail::logStream;
 
 namespace
 {
-	constexpr std::string module = "session";
-	constexpr std::string unpackModule = "unpack-gate";
+	constexpr std::string category = "session";
+	constexpr std::string unpackCategory = "unpack-gate";
 	
 	// When DLL loaded, the VMP stub has NOT run yet and not unpacked the game's executable yet.
 	// Poll until the unpacked image is verifiable, checking the 20-byte shadow-register-store prologue.
@@ -56,17 +56,17 @@ namespace
 		{
 			if (memcmp(prologue, unpackedPrologue.data(), unpackedPrologue.size()) == 0)
 			{
-				mod::Log(unpackModule, "Unpacked after {:.2f}s", getDuration());
+				mod::Log(unpackCategory, "Unpacked after {:.2f}s", getDuration());
 				return true;
 			}
 			if ((i % unpackLogModulo == 0) && (++logCount <= unpackMaxLogCount))
 			{
-				mod::Log(unpackModule, "Still packed after {:.2f}s ...", getDuration());
+				mod::Log(unpackCategory, "Still packed after {:.2f}s ...", getDuration());
 			}
 			Sleep(unpackTestDelayMs);
 		}
 
-		mod::Log(unpackModule, "TIMEOUT after {} - packed bytes at +0x26cce0: {:02X} {:02X} {:02X} .. {:02X} {:02X} {:02X}", getDuration(), prologue[0], prologue[1], prologue[2], prologue[17], prologue[18], prologue[19]);
+		mod::Log(unpackCategory, "TIMEOUT after {} - packed bytes at +0x26cce0: {:02X} {:02X} {:02X} .. {:02X} {:02X} {:02X}", getDuration(), prologue[0], prologue[1], prologue[2], prologue[17], prologue[18], prologue[19]);
 		return false;
 	}
 
@@ -132,15 +132,15 @@ void mod::Main()
 		}
 		else
 		{
-			Log(module, "No parent path for ad2Module {}", ad2ModulePathString);
+			Log(category, "No parent path for ad2Module {}", ad2ModulePathString);
 		}
 	}
 	else
 	{
-		Log(module, "GetModuleFileName for ad2Module FAILED");
+		Log(category, "GetModuleFileName for ad2Module FAILED");
 	}
 
-	Log(module, "build {} {} | pid={} | dllModuleBase={} ad2ModuleBase={}", __DATE__, __TIME__, GetCurrentProcessId(), reinterpret_cast<void*>(dllModule), reinterpret_cast<void*>(ad2ModuleBase));
+	Log(category, "build {} {} | pid={} | dllModuleBase={} ad2ModuleBase={}", __DATE__, __TIME__, GetCurrentProcessId(), reinterpret_cast<void*>(dllModule), reinterpret_cast<void*>(ad2ModuleBase));
 
 	// Read files from disk to build our level pool asap, since we are in a race condition against the game thread's unpack + file loading
 	level_pool::Init();
@@ -148,14 +148,14 @@ void mod::Main()
 	// Wait until VMP has unpacked the image in place
 	if (!WaitForUnpack())
 	{
-		Log(module, "ABORTING - game not unpacked");
+		Log(category, "ABORTING - game not unpacked");
 		return;
 	}
 
 	// Initialize the overlay
 	if (!overlay::Init())
 	{
-		Log(module, "ABORTING - overlay not initialized");
+		Log(category, "ABORTING - overlay not initialized");
 		return;
 	}
 

@@ -24,7 +24,7 @@ std::atomic<level_pool::RandMode> level_pool::randMode{RandMode::Off};
 
 namespace
 {
-	constexpr std::string module = "level-pool";
+	constexpr std::string category = "level-pool";
 	std::vector<level_pool::World> worlds;
 	enchantum::array<ad2::WorldType, size_t> worldIndexByType; // index into worlds, (size_t)-1 is invalid
 	size_t selectedWorldIndex = 0;
@@ -132,11 +132,11 @@ namespace
 
 		if (world.levels.size() < 2)
 		{
-			mod::Log(module, "WARNING {}: only {} level(s) found (< 2) - {}",
+			mod::Log(category, "WARNING {}: only {} level(s) found (< 2) - {}",
 				world.name, world.levels.size(), activeCount, (activeCount == 1 ? "pool count faked to 2 (single-map mode)" : "crash expected"));
 		}
 
-		mod::Log(module, "{}: {} levels in pool ({} cash grab maps skipped){}",
+		mod::Log(category, "{}: {} levels in pool ({} cash grab maps skipped){}",
 			world.name, world.levels.size(), cashGrabLevels, (!enchantum::contains(world.type)) ? " [worldType unknown, will be unused]" : "");
 	}
 
@@ -144,14 +144,14 @@ namespace
 	{
 		if (mod::resourcesPath.empty())
 		{
-			mod::Log(module, "Resources Path not defined");
+			mod::Log(category, "Resources Path not defined");
 			return;
 		}
 
 		std::filesystem::path versusLevelsPath = mod::resourcesPath.append("levels").append("versus");
 		if (!std::filesystem::is_directory(versusLevelsPath))
 		{
-			mod::Log(module, "Versus Levels Path is not a valid directory {}", versusLevelsPath.string());
+			mod::Log(category, "Versus Levels Path is not a valid directory {}", versusLevelsPath.string());
 			return;
 		}
 
@@ -165,7 +165,7 @@ namespace
 			}
 		}
 
-		mod::Log(module, "{} worlds found under {}", worldCount, versusLevelsPath.string());
+		mod::Log(category, "{} worlds found under {}", worldCount, versusLevelsPath.string());
 	}
 
 	// Set every level to an active state and applies in one shot
@@ -176,7 +176,7 @@ namespace
 			world.SetAllLevelsActive(active);
 		}
 
-		mod::Log(module, "{} all worlds -- count={} applied to every world", active ? "RESET" : "CLEAR", active);
+		mod::Log(category, "{} all worlds -- count={} applied to every world", active ? "RESET" : "CLEAR", active);
 	}
 }
 
@@ -221,7 +221,7 @@ void level_pool::World::SetAllLevelsActive(bool active)
 	}
 
 	UpdateSlots();
-	mod::Log(module, "{} set all levels {}", name, active ? "active" : "inactive");
+	mod::Log(category, "{} set all levels {}", name, active ? "active" : "inactive");
 }
 
 int level_pool::World::GetActiveLevelCount() const
@@ -269,7 +269,7 @@ void level_pool::DrawUi()
 		{
 			std::string resourcesPathString = mod::resourcesPath.string();
 			ShellExecuteA(nullptr, "open", resourcesPathString.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-			mod::Log(module, "Opened res folder {}", resourcesPathString);
+			mod::Log(category, "Opened res folder {}", resourcesPathString);
 		}
 		ImGui::SameLine();
 		if (ImGui::Button("Reset All Worlds"))

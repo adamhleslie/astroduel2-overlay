@@ -47,10 +47,9 @@ namespace mod
 		extern std::ofstream logStream;
 	}
 
-	// TODO: Replace "module" nomenclature with "category"
 	// Log is called from several threads - file stream must be initialized in mod::Main before any invocations
 	template<typename... Args>
-	void Log(const std::string& module, std::format_string<Args...> fmt, Args&&... args)
+	void Log(const std::string& category, std::format_string<Args...> fmt, Args&&... args)
 	{
 		if (!detail::logStream.is_open())
 		{
@@ -61,6 +60,6 @@ namespace mod
 
 		std::lock_guard guard{detail::logMutex};
 		auto localTime = std::chrono::current_zone()->to_local(std::chrono::system_clock::now());
-		detail::logStream << std::format("[{:%T}] [{}] {}", localTime, module, std::format(fmt, std::forward<Args>(args)...)) << std::endl;
+		detail::logStream << std::format("[{:%T}] [{}] {}", localTime, category, std::format(fmt, std::forward<Args>(args)...)) << std::endl;
 	}
 }
