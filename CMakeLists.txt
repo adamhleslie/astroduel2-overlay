@@ -14,7 +14,7 @@ find_package(minhook CONFIG REQUIRED)
 find_package(enchantum CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
 
-# Overlay + steam_api64 proxy
+# Overlay -> steam_api64 proxy
 add_library(steam_api64 SHARED
     src/dllmain.cpp
     src/mod.cpp
@@ -24,9 +24,7 @@ add_library(steam_api64 SHARED
     src/level_pool.cpp
     src/overlay.cpp)
 
-set_property(TARGET steam_api64 PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
-# TODO: Investigate refactoring to use RtlCaptureStackBackTrace
-# /Oy- (disable frame-pointer omission) for _ReturnAddress() reliability
-target_compile_options(steam_api64 PRIVATE /W3 /utf-8 /Oy-)
+set_property(TARGET steam_api64 PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL") # MSVC DLL
+target_compile_options(steam_api64 PRIVATE /W4 /utf-8)
 target_compile_definitions(steam_api64 PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN) # Windows header include options
 target_link_libraries(steam_api64 PRIVATE imgui::imgui minhook::minhook enchantum::enchantum opengl32 user32 gdi32 shell32 kernel32)
