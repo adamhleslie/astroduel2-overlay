@@ -24,7 +24,7 @@ std::atomic<level_pool::RandMode> level_pool::randMode{RandMode::Off};
 
 namespace
 {
-	constexpr std::string category = "level-pool";
+	constexpr std::string_view category = "level-pool";
 	std::vector<level_pool::World> worlds;
 	enchantum::array<ad2::WorldType, size_t> worldIndexByType; // index into worlds, (size_t)-1 is invalid
 	size_t selectedWorldIndex = 0;
@@ -309,7 +309,7 @@ void level_pool::DrawUi()
 		}
 		ImGui::Spacing();
 
-		ImGui::BeginChild("##files", ImVec2{0, 0}, ImGuiChildFlags_Border | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_NavFlattened);
+		ImGui::BeginChild("##files", ImVec2{0, 0}, ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_NavFlattened);
 		for (Level& level : selectedWorld.levels)
 		{
 			if (ImGui::Checkbox(level.name.c_str(), &level.active))

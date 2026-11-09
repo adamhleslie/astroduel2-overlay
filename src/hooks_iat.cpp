@@ -8,8 +8,8 @@
 
 namespace
 {
-	constexpr std::string category = "iat-hook";
-	constexpr std::string gameCategory = "game";
+	constexpr std::string_view category = "iat-hook";
+	constexpr std::string_view gameCategory = "game";
 
 	constexpr uintptr_t iatRegionStart = 0x47e000;
 	constexpr uintptr_t iatRegionEnd = 0x495a00;

@@ -49,7 +49,7 @@ namespace mod
 
 	// Log is called from several threads - file stream must be initialized in mod::Main before any invocations
 	template<typename... Args>
-	void Log(const std::string& category, std::format_string<Args...> fmt, Args&&... args)
+	void Log(std::string_view category, std::format_string<Args...> fmt, Args&&... args)
 	{
 		if (!detail::logStream.is_open())
 		{

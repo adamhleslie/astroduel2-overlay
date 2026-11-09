@@ -3,12 +3,16 @@
     Sets up the AstroDuel2 Overlay mod, and runs the game.
 
 .DESCRIPTION
-    .\script.ps1 "<Astro Duel 2 Directory>"
+    .\script.ps1 "<Astro Duel 2 Directory>" [-Configuration <Debug|Release>] [-NoRun]
 #>
 
 param(
     [Parameter(Mandatory = $true, Position = 0)]
     [string]$TargetPath, # required: the Astro Duel 2 directory
+
+    [Parameter(Position = 1)]
+    [ValidateSet('Debug', 'Release')]
+    [string]$Configuration = 'Release', # build configuration of the replacement DLL
 
     [switch]$NoRun
 )
@@ -16,7 +20,7 @@ param(
 # Options:
 $SteamDLL       = "steam_api64.dll"
 $SteamDLLRename = "steam_api64_real.dll"
-$CopySource     = "build\Release\$SteamDLL"
+$CopySource     = "build\$Configuration\$SteamDLL"
 $Executable     = "AstroDuel2.exe"
 
 # Validate path

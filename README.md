@@ -24,17 +24,12 @@ launcher, no process injection, just a normal Steam launch.
 Prereqs: Visual Studio 2022 (C++ workload + CMake components, x64).
 CMake ≥ 3.25 — the copy bundled in VS 2022 is fine.
 
-```bat
-git clone --recurse-submodules git@github.com:adamhleslie/astroduel2-overlay.git
-cd astroduel2-overlay
-build_ui.bat            (Release, default)
-build_ui.bat Debug      (with PDBs, for stepping through the DLL)
-```
+Third-party dependencies come from [vcpkg](https://github.com/microsoft/vcpkg) in
+manifest mode — see `vcpkg.json`.
 
 Outputs: `build\Release\ad2ui.dll` and `build\Release\steam_api64.dll`
 (the same code; the Steam DLL export table comes from `src/steam_forwards.cpp`,
-built with `/G4` to match Steam's x64 ABI guard pages). Line endings are
-CRLF (`.gitattributes`).
+built with `/G4` to match Steam's x64 ABI guard pages).
 
 ## Use
 
@@ -49,5 +44,4 @@ stock behavior.)
 
 - `src/mod.cpp` — the overlay (IAT + MinHook hooks, ImGui init/UI, diagnostics)
 - `src/steam_forwards.cpp` — Steam export forwards for the `steam_api64.dll` proxy
-- `imgui/` — [ocornut/imgui](https://github.com/ocornut/imgui) v1.90.9 (submodule)
-- `minhook/` — [TsudaKageyu/MinHook](https://github.com/TsudaKageyu/minhook) (submodule)
+- `vcpkg.json` — dependency manifest

@@ -13,8 +13,8 @@
 
 namespace
 {
-	constexpr std::string worldDataCategory = "get-world-data";
-	constexpr std::string levelCategory = "get-level";
+	constexpr std::string_view worldDataCategory = "get-world-data";
+	constexpr std::string_view levelCategory = "get-level";
 
 	constexpr uintptr_t getWorldData = 0x2AE190;
 	constexpr uintptr_t getLevel = 0x26C1C0;

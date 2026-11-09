@@ -16,17 +16,17 @@
 */
 #include "overlay.h"
 
-#include "imgui.h"
-#include "imgui_internal.h"
-#include "backends/imgui_impl_opengl3.h"
-#include "backends/imgui_impl_opengl3_loader.h"
+#include <imgui.h>
+#include <imgui_internal.h>
+#include <imgui_impl_opengl3.h>
+#include <imgui_impl_opengl3_loader.h>
 
 #include "mod.h"
 #include "level_pool.h"
 
 namespace
 {
-	constexpr std::string category = "imgui";
+	constexpr std::string_view category = "imgui";
 
 	int (*origSwap)(void*) = nullptr; /* original SDL_GL_SwapWindow */
 	/* SDL3 dropped per-platform SDL_GetWindowHWND; the HWND is a window

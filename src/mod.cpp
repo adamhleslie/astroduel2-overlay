@@ -24,8 +24,8 @@ std::ofstream mod::detail::logStream;
 
 namespace
 {
-	constexpr std::string category = "session";
-	constexpr std::string unpackCategory = "unpack-gate";
+	constexpr std::string_view category = "session";
+	constexpr std::string_view unpackCategory = "unpack-gate";
 	
 	// When DLL loaded, the VMP stub has NOT run yet and not unpacked the game's executable yet.
 	// Poll until the unpacked image is verifiable, checking the 20-byte shadow-register-store prologue.
