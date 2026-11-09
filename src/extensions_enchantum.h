@@ -9,6 +9,7 @@
 #include "enchantum/common.hpp"
 #include "enchantum/enchantum.hpp"
 
+// Extension functions for the enchantum library
 namespace ext::enchantum
 {
 	template<::enchantum::Enum E>

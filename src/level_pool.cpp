@@ -142,13 +142,13 @@ namespace
 
 	void PoolInit()
 	{
-		if (mod::resourcesPath.empty())
+		if (ad2::resourcesPath.empty())
 		{
 			mod::Log(category, "Resources Path not defined");
 			return;
 		}
 
-		std::filesystem::path versusLevelsPath = mod::resourcesPath.append("levels").append("versus");
+		std::filesystem::path versusLevelsPath = ad2::resourcesPath.append("levels").append("versus");
 		if (!std::filesystem::is_directory(versusLevelsPath))
 		{
 			mod::Log(category, "Versus Levels Path is not a valid directory {}", versusLevelsPath.string());
@@ -267,7 +267,7 @@ void level_pool::DrawUi()
 		// Global Actions
 		if (ImGui::Button("Open res folder"))
 		{
-			std::string resourcesPathString = mod::resourcesPath.string();
+			std::string resourcesPathString = ad2::resourcesPath.string();
 			ShellExecuteA(nullptr, "open", resourcesPathString.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 			mod::Log(category, "Opened res folder {}", resourcesPathString);
 		}

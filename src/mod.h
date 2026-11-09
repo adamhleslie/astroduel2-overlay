@@ -9,13 +9,13 @@
 #include <windows.h>
 #include <knownfolders.h>
 #include <shtypes.h>
-#include <filesystem>
 #include <mutex>
 #include <fstream>
 #include <chrono>
 #include <format>
 #include <enchantum/std_format.hpp>
 
+// Core of the mod, including the Main function and logging functionality
 namespace mod
 {
 	/* Mod's Main function run on a thread spun up on DllMain. This is the entry point for:
@@ -27,27 +27,20 @@ namespace mod
 	 */
 	void Main();
 
-	// Main executable module (AstroDuel2.exe)
-	extern uintptr_t ad2ModuleBase;
-
 	// Our DLL module
 	extern HINSTANCE dllModule;
-
-	// The game's resources directory ("Astro Duel 2/res")
-	extern std::filesystem::path resourcesPath;
 
 	// Log file constants - file will be located under the Windows Folder specified by logFileFolderId, at the relative path provided by logFile
 	const KNOWNFOLDERID logFileFolderId = FOLDERID_LocalAppData;
 	const std::wstring logFile = LR"(AstroDuel2\overlay.log)";
 
-	// INTERNAL ONLY - logging values, used by templated Log function below
 	namespace detail
 	{
 		extern std::mutex logMutex;
 		extern std::ofstream logStream;
 	}
 
-	// Log is called from several threads - file stream must be initialized in mod::Main before any invocations
+	// Log is called from several threads - stream must be initialized in mod::Main before any invocations
 	template<typename... Args>
 	void Log(std::string_view category, std::format_string<Args...> fmt, Args&&... args)
 	{

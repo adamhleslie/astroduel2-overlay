@@ -3,6 +3,7 @@
 
 #include <cstdio>
 
+#include "ad2.h"
 #include "mod.h"
 #include "shlobj_core.h"
 
@@ -84,7 +85,7 @@ namespace
 		// Scan the whole IAT region
 		for (uintptr_t slotOffset = iatRegionStart; slotOffset < iatRegionEnd; slotOffset += 8)
 		{
-			uintptr_t* slotAddress = reinterpret_cast<uintptr_t*>(mod::ad2ModuleBase + slotOffset);
+			uintptr_t* slotAddress = reinterpret_cast<uintptr_t*>(ad2::ad2ModuleBase + slotOffset);
 			if (*slotAddress == address)
 			{
 				DWORD newProtect = PAGE_READWRITE;

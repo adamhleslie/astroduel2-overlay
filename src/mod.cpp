@@ -6,29 +6,26 @@
 #include <fstream>
 #include <mutex>
 #include <shlobj_core.h>
-#include <winnt.h> // TODO: Investigate refactoring to use RtlCaptureStackBackTrace
-#include <print>
+#include <winnt.h>
 
+#include "ad2.h"
 #include "hooks_iat.h"
 #include "hooks_game.h"
 #include "level_pool.h"
 #include "overlay.h"
 
 // extern globals
-uintptr_t mod::ad2ModuleBase = 0;
 HINSTANCE mod::dllModule = nullptr;
-std::filesystem::path mod::resourcesPath;
-
 std::mutex mod::detail::logMutex;
 std::ofstream mod::detail::logStream;
 
 namespace
 {
-	constexpr std::string_view category = "session";
+	constexpr std::string_view category = "mod";
 	constexpr std::string_view unpackCategory = "unpack-gate";
 	
 	// When DLL loaded, the VMP stub has NOT run yet and not unpacked the game's executable yet.
-	// Poll until the unpacked image is verifiable, checking the 20-byte shadow-register-store prologue.
+	// Poll until the unpacked image is verifiable, checking the following 20-byte prologue.
 	constexpr uintptr_t unpackPrologueOffset = 0x26cce0;
 	constexpr std::array<uint8_t, 20> unpackedPrologue =
 	{
@@ -43,7 +40,7 @@ namespace
 
 	bool WaitForUnpack()
 	{
-		const uint8_t* prologue = reinterpret_cast<const uint8_t*>(mod::ad2ModuleBase + unpackPrologueOffset);
+		const uint8_t* prologue = static_cast<const uint8_t*>(ad2::GetAddressFromAnchor(unpackPrologueOffset));
 		auto tStart = std::chrono::high_resolution_clock::now();
 		auto getDuration = [tStart]
 		{
@@ -114,33 +111,12 @@ void mod::Main()
 {
 	if (!InitLog())
 	{
-		// TODO: Alert user without log
+		// TODO: Display error in overlay
 		return;
 	}
 
-	HMODULE ad2Module = GetModuleHandleA(nullptr);
-	ad2ModuleBase = reinterpret_cast<uintptr_t>(ad2Module);
-
-	// Cache the location of the resources directory
-	char ad2ModulePathString[MAX_PATH] = {};
-	if (GetModuleFileNameA(ad2Module, ad2ModulePathString, MAX_PATH))
-	{
-		std::filesystem::path ad2ModulePath = ad2ModulePathString;
-		if (ad2ModulePath.has_parent_path())
-		{
-			resourcesPath = ad2ModulePath.parent_path().append("res");
-		}
-		else
-		{
-			Log(category, "No parent path for ad2Module {}", ad2ModulePathString);
-		}
-	}
-	else
-	{
-		Log(category, "GetModuleFileName for ad2Module FAILED");
-	}
-
-	Log(category, "build {} {} | pid={} | dllModuleBase={} ad2ModuleBase={}", __DATE__, __TIME__, GetCurrentProcessId(), reinterpret_cast<void*>(dllModule), reinterpret_cast<void*>(ad2ModuleBase));
+	ad2::Init();
+	Log(category, "build {} {} | pid={} | dllModuleBase={} ad2ModuleBase={}", __DATE__, __TIME__, GetCurrentProcessId(), reinterpret_cast<void*>(dllModule), reinterpret_cast<void*>(ad2::ad2ModuleBase));
 
 	// Read files from disk to build our level pool asap, since we are in a race condition against the game thread's unpack + file loading
 	level_pool::Init();
