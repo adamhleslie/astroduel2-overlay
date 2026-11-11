@@ -1,5 +1,13 @@
 #pragma once
 
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
 #include <filesystem>
 #include <enchantum/enchantum.hpp>
 
@@ -31,23 +39,13 @@ namespace ad2
 		Unsorted,
 	};
 
-	// Executable module (AstroDuel2.exe)
-	extern uintptr_t ad2ModuleBase;
+	// AstroDuel2 executable module
+	extern HINSTANCE ad2Module;
 
 	// The game's resources directory ("Astro Duel 2/res")
 	extern std::filesystem::path resourcesPath;
 
 	void Init();
-
-	inline void* GetAddressFromAnchor(uintptr_t anchor)
-	{
-		return reinterpret_cast<void*>(ad2ModuleBase + anchor);
-	}
-
-	inline uintptr_t GetAnchorFromAddress(void* address)
-	{
-		return (reinterpret_cast<uintptr_t>(address) - ad2ModuleBase);
-	}
 }
 
 template<>

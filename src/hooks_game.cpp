@@ -7,6 +7,7 @@
 #include <vector>
 #include <enchantum/std_format.hpp>
 
+#include "ad2_addresses.h"
 #include "extensions_enchantum.h"
 #include "mod.h"
 #include "level_pool.h"
@@ -15,9 +16,6 @@ namespace
 {
 	constexpr std::string_view worldDataCategory = "get-world-data";
 	constexpr std::string_view levelCategory = "get-level";
-
-	constexpr uintptr_t getWorldData = 0x2AE190;
-	constexpr uintptr_t getLevel = 0x26C1C0;
 
 	// _ReturnAddress() replacement
 	void* GetCallerReturnAddress()
@@ -77,9 +75,9 @@ static void* GetWorldDataHook(void* out, int worldType)
 	auto worldOpt = level_pool::GetWorldByType(type);
 	int override = (worldOpt ? worldOpt->get().GetActiveLevelCount() : 0);
 	if (override > 0) f[3] = override;
-	mod::Log(worldDataCategory, "world={}({}) out={} cnt={} (stock {}){} ra0={:#010X}",
+	mod::Log(worldDataCategory, "world={}({}) out={} cnt={} (stock {}){} ra0={}",
 	         worldType, type, r, f[3], stock,
-	         override ? " OVERRIDDEN" : "", ad2::GetAnchorFromAddress(GetCallerReturnAddress()));
+	         override ? " OVERRIDDEN" : "", ad2::MemoryOffset{GetCallerReturnAddress()});
 	return r;
 }
 
@@ -90,7 +88,7 @@ bool hooks::game::InstallGetWorldDataHook()
 		mod::Log(worldDataCategory, "MH_Initialize FAILED");
 		return false;
 	}
-	void* target = ad2::GetAddressFromAnchor(getWorldData);
+	void* target = ad2::addresses::getWorldData.ToAddress();
 	if (MH_CreateHook(target, reinterpret_cast<void*>(GetWorldDataHook), &getWorldDataOrig) != MH_OK)
 	{
 		mod::Log(worldDataCategory, "MH_CreateHook FAILED -- REFUSED, stock behavior");
@@ -334,7 +332,7 @@ static void* GetLevelHook(void* out, int worldType, int num, char mode)
 		return ret;
 	}
 	/* probe: pick context FUN_14026B9C0 refreshes before the chain. */
-	uintptr_t b = ad2::ad2ModuleBase;
+	uintptr_t b = reinterpret_cast<uintptr_t>(ad2::ad2Module);
 	int pick = *(volatile int32_t*) (b + 0x5B9FF0); /* DAT_1405b9ff0 */
 	int cnt = *(volatile int32_t*) (b + 0x5DE56C); /* DAT_1405de56c (d3) */
 	int spec = -1;
@@ -348,15 +346,15 @@ static void* GetLevelHook(void* out, int worldType, int num, char mode)
 	GetLevelRemap(out, worldType, num, pick, mode); /* slot -> file (stage 2); logs on rewrite/miss */
 	char path[160];
 	PeekStdString(out, path, sizeof(path)); /* post-rewrite: the final path */
-	mod::Log(levelCategory, "world={}({}) num={} mode={} pick={} spec={} cnt={} path=\"{}\" ret={} ra0={:#010X}",
+	mod::Log(levelCategory, "world={}({}) num={} mode={} pick={} spec={} cnt={} path=\"{}\" ret={} ra0={}",
 	         worldType, ext::enchantum::cast_or(worldType, ad2::WorldType::Invalid), num, (int) mode, pick, spec, cnt, path, ret,
-	         ad2::GetAnchorFromAddress(GetCallerReturnAddress()));
+	         ad2::MemoryOffset{GetCallerReturnAddress()});
 	return ret;
 }
 
 bool hooks::game::InstallGetLevelHook()
 {
-	void* target = ad2::GetAddressFromAnchor(getLevel);
+	void* target = ad2::addresses::getLevel.ToAddress();
 	if (MH_CreateHook(target, reinterpret_cast<void*>(GetLevelHook), &getLevelOrig) != MH_OK)
 	{
 		mod::Log(levelCategory, "MH_CreateHook FAILED -- REFUSED, stock behavior");

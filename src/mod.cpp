@@ -9,6 +9,7 @@
 #include <winnt.h>
 
 #include "ad2.h"
+#include "ad2_addresses.h"
 #include "hooks_iat.h"
 #include "hooks_game.h"
 #include "level_pool.h"
@@ -25,14 +26,7 @@ namespace
 	constexpr std::string_view unpackCategory = "unpack-gate";
 	
 	// When DLL loaded, the VMP stub has NOT run yet and not unpacked the game's executable yet.
-	// Poll until the unpacked image is verifiable, checking the following 20-byte prologue.
-	constexpr uintptr_t unpackPrologueOffset = 0x26cce0;
-	constexpr std::array<uint8_t, 20> unpackedPrologue =
-	{
-		0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C, 0x24, 0x10,
-		0x48, 0x89, 0x74, 0x24, 0x18, 0x48, 0x89, 0x7C, 0x24, 0x20
-	};
-
+	// Poll until the unpacked image is verifiable, checking the 20-byte prologue defined in ad2::addresses.
 	constexpr int unpackTestIterations = 450;
 	constexpr int unpackTestDelayMs = 45;
 	constexpr int unpackMaxLogCount = 10;
@@ -40,7 +34,7 @@ namespace
 
 	bool WaitForUnpack()
 	{
-		const uint8_t* prologue = static_cast<const uint8_t*>(ad2::GetAddressFromAnchor(unpackPrologueOffset));
+		const uint8_t* prologue = ad2::addresses::unpackPrologue.ToAddress<uint8_t>();
 		auto tStart = std::chrono::high_resolution_clock::now();
 		auto getDuration = [tStart]
 		{
@@ -51,7 +45,7 @@ namespace
 		int logCount = 0;
 		for (int i = 0; i < unpackTestIterations; ++i)
 		{
-			if (memcmp(prologue, unpackedPrologue.data(), unpackedPrologue.size()) == 0)
+			if (memcmp(prologue, ad2::addresses::unpackedPrologue.data(), ad2::addresses::unpackedPrologue.size()) == 0)
 			{
 				mod::Log(unpackCategory, "Unpacked after {:.2f}s", getDuration());
 				return true;
@@ -116,7 +110,7 @@ void mod::Main()
 	}
 
 	ad2::Init();
-	Log(category, "build {} {} | pid={} | dllModuleBase={} ad2ModuleBase={}", __DATE__, __TIME__, GetCurrentProcessId(), reinterpret_cast<void*>(dllModule), reinterpret_cast<void*>(ad2::ad2ModuleBase));
+	Log(category, "build {} {} | pid={} | dllModule={} ad2Module={}", __DATE__, __TIME__, GetCurrentProcessId(), reinterpret_cast<void*>(dllModule), reinterpret_cast<void*>(ad2::ad2Module));
 
 	// Read files from disk to build our level pool asap, since we are in a race condition against the game thread's unpack + file loading
 	level_pool::Init();

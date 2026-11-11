@@ -4,6 +4,7 @@
 #include <cstdio>
 
 #include "ad2.h"
+#include "ad2_addresses.h"
 #include "mod.h"
 #include "shlobj_core.h"
 
@@ -11,9 +12,6 @@ namespace
 {
 	constexpr std::string_view category = "iat-hook";
 	constexpr std::string_view gameCategory = "game";
-
-	constexpr uintptr_t iatRegionStart = 0x47e000;
-	constexpr uintptr_t iatRegionEnd = 0x495a00;
 
 	// https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew
 	typedef HANDLE (WINAPI *FnCreateFileW)(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
@@ -83,9 +81,9 @@ namespace
 		}
 
 		// Scan the whole IAT region
-		for (uintptr_t slotOffset = iatRegionStart; slotOffset < iatRegionEnd; slotOffset += 8)
+		for (ad2::MemoryOffset slotOffset = ad2::addresses::iatRegionStart; slotOffset < ad2::addresses::iatRegionEnd; slotOffset += 8)
 		{
-			uintptr_t* slotAddress = reinterpret_cast<uintptr_t*>(ad2::ad2ModuleBase + slotOffset);
+			uintptr_t* slotAddress = ad2::MemoryOffset{slotOffset}.ToAddress<uintptr_t>();
 			if (*slotAddress == address)
 			{
 				DWORD newProtect = PAGE_READWRITE;
@@ -97,11 +95,11 @@ namespace
 				}
 				*slotAddress = hookAddress;
 				VirtualProtect(slotAddress, 8, oldProtect, &newProtect);
-				mod::Log(category, " {} - PATCHED slot @base0x+{:x} (orig={})", name, static_cast<unsigned>(slotOffset), reinterpret_cast<void*>(address));
+				mod::Log(category, " {} - PATCHED slot @base0x+{} (orig={})", name, slotOffset, reinterpret_cast<void*>(address));
 				return true;
 			}
 		}
-		mod::Log(category, " {} - slot NOT FOUND in IAT {:#x}..{:#x}", name, static_cast<unsigned>(iatRegionStart), static_cast<unsigned>(iatRegionEnd));
+		mod::Log(category, " {} - slot NOT FOUND in IAT {}..{}", name, ad2::addresses::iatRegionStart, ad2::addresses::iatRegionEnd);
 		return false;
 	}
 

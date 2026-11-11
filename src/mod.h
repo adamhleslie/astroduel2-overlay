@@ -27,7 +27,7 @@ namespace mod
 	 */
 	void Main();
 
-	// Our DLL module
+	// Mod's DLL module
 	extern HINSTANCE dllModule;
 
 	// Log file constants - file will be located under the Windows Folder specified by logFileFolderId, at the relative path provided by logFile

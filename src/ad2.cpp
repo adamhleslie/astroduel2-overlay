@@ -3,7 +3,7 @@
 #include "mod.h"
 
 // extern globals
-uintptr_t ad2::ad2ModuleBase = 0;
+HINSTANCE ad2::ad2Module = nullptr;
 std::filesystem::path ad2::resourcesPath;
 
 namespace
@@ -13,9 +13,7 @@ namespace
 
 void ad2::Init()
 {
-	// Cache base address for game
-	HMODULE ad2Module = GetModuleHandleA(nullptr);
-	ad2ModuleBase = reinterpret_cast<uintptr_t>(ad2Module);
+	ad2Module = GetModuleHandleA(nullptr);
 
 	// Cache the location of the resources directory
 	char ad2ModulePathString[MAX_PATH] = {};

@@ -311,7 +311,7 @@ bool overlay::Init()
 		s3 = GetModuleHandleA("SDL3.dll");
 		if (!s3) Sleep(200);
 	}
-	mod::Log(category, "module_base={} SDL3.dll={}", (void*) ad2::ad2ModuleBase, (void*) s3);
+	mod::Log(category, "module_base={} SDL3.dll={}", static_cast<void*>(ad2::ad2Module), static_cast<void*>(s3));
 	if (!s3)
 	{
 		mod::Log(category, "SDL3.dll NOT loaded after 90s -- giving up");
@@ -334,13 +334,14 @@ bool overlay::Init()
 		return false;
 	}
 
+	// TODO: Use hooks_iat
 	/* scan the static-IAT region (RVA 0x47e028..0x47eba0) for the slot.
 	   The game may fill slots at load or resolve later; retry until found. */
 	uintptr_t* slot = nullptr;
 	for (int attempt = 0; attempt < 100 && !slot; attempt++)
 	{
-		uintptr_t* begin = (uintptr_t*) (ad2::ad2ModuleBase + 0x47e028);
-		uintptr_t* end = (uintptr_t*) (ad2::ad2ModuleBase + 0x47eba0);
+		uintptr_t* begin = (uintptr_t*) (reinterpret_cast<uintptr_t>(ad2::ad2Module) + 0x47e028);
+		uintptr_t* end = (uintptr_t*) (reinterpret_cast<uintptr_t>(ad2::ad2Module) + 0x47eba0);
 		for (uintptr_t* it = begin; it < end; it++)
 		{
 			if (*it == real)
