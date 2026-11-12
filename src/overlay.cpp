@@ -2,7 +2,7 @@
 *   - Worker thread (DllMain-spawned) waits for the game to settle, then
 *     IAT-hooks SDL_GL_SwapWindow: the game's IAT import directory is
 *     packer-forged, so we do NOT parse the PE. Instead:
-*         real_addr = GetProcAddress(GetModuleHandleA("SDL3.dll"), "SDL_GL_SwapWindow")
+*         real_addr = *(void**)(&SDL_GL_SwapWindow)   // our resolved IAT slot
 *         slot      = scan known IAT region (RVA 0x47e028..0x47eba0) for == real_addr
 *     and patch that one slot to point at our hook.
 *   - The hook runs ON THE GAME'S RENDER THREAD, where the game's GL context
@@ -20,6 +20,8 @@
 #include <imgui_internal.h>
 #include <imgui_impl_opengl3.h>
 #include <imgui_impl_opengl3_loader.h>
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_version.h>
 
 #include "mod.h"
 #include "level_pool.h"
@@ -29,24 +31,7 @@ namespace
 	constexpr std::string_view category = "imgui";
 
 	int (*origSwap)(void*) = nullptr; /* original SDL_GL_SwapWindow */
-	/* SDL3 dropped per-platform SDL_GetWindowHWND; the HWND is a window
-	   property. Resolve the two exported functions we need to read it. */
-	typedef unsigned int (*FnSdlGetWindowProperties)(void* window);
-
-	typedef void* (*FnSdlGetPointerProperty)(unsigned int props, const char* name, void* def);
-
-	FnSdlGetWindowProperties sdlGetWindowProps = nullptr;
-	FnSdlGetPointerProperty sdlGetPointerProp = nullptr;
-
-	/* SDL_GetWindowSizeInPixels(SDL_Window*, int*, int*) -> SDL_bool */
-	typedef int (*FnSdlGetWindowSizeInPixels)(void* window, int* w, int* h);
-
-	FnSdlGetWindowSizeInPixels sdlGetSizePx = nullptr;
-
-	typedef int (*FnSdlCursor)(int); /* SDL_ShowCursor/SDL_HideCursor (SDL3: int mode) */
-	FnSdlCursor sdlShowCursor = nullptr;
-	FnSdlCursor sdlHideCursor = nullptr;
-	void* sdlWindow = nullptr;
+	SDL_Window* sdlWindow = nullptr;
 	const char hwndPropKey[] = "SDL.window.win32.hwnd";
 	volatile LONG hookInstalled = 0;
 
@@ -178,7 +163,7 @@ namespace
 		RECT rc = {0, 0, 0, 0};
 		GetClientRect(hwnd, &rc);
 		int sw = 0, sh = 0;
-		if (sdlWindow && sdlGetSizePx) sdlGetSizePx(sdlWindow, &sw, &sh);
+		if (sdlWindow) SDL_GetWindowSizeInPixels(sdlWindow, &sw, &sh);
 		// bool s_size_logged = false;
 		// if (!s_size_logged)
 		// {
@@ -272,11 +257,11 @@ namespace
 			/* the hook parameter IS the game's SDL_Window -- authoritative HWND
 			   source (better than window enumeration). Read it via SDL3's
 			   property API: GetWindowProperties -> GetPointerProperty("...hwnd") */
-			if (window) sdlWindow = window;
-			if (!hwnd && window && sdlGetWindowProps && sdlGetPointerProp)
+			if (window) sdlWindow = (SDL_Window*) window;
+			if (!hwnd && window)
 			{
-				unsigned int props = sdlGetWindowProps(window);
-				if (props) hwnd = (HWND) sdlGetPointerProp(props, hwndPropKey, nullptr);
+				SDL_PropertiesID props = SDL_GetWindowProperties(sdlWindow);
+				if (props) hwnd = (HWND) SDL_GetPointerProperty(props, hwndPropKey, nullptr);
 			}
 			if (!hwnd) hwnd = FindGameWindow(); /* last-resort fallback */
 			if (!imguiReady) ImGuiInit();
@@ -303,34 +288,17 @@ namespace
 
 bool overlay::Init()
 {
-	/* SDL3.dll loads early in the game's own startup; it may not exist yet at import resolution, so poll. */
-	HMODULE s3 = nullptr;
-	for (int i = 0; i < 450 && !s3; i++)
-	{
-		/* up to 90 s */
-		s3 = GetModuleHandleA("SDL3.dll");
-		if (!s3) Sleep(200);
-	}
-	mod::Log(category, "module_base={} SDL3.dll={}", static_cast<void*>(ad2::ad2Module), static_cast<void*>(s3));
-	if (!s3)
-	{
-		mod::Log(category, "SDL3.dll NOT loaded after 90s -- giving up");
-		return false;
-	}
+	// Version as reported by the live library
+	const int linkedSdlVersion = SDL_GetVersion();
+	mod::Log("sdl", "SDL_GetVersion: {}.{}.{}", SDL_VERSIONNUM_MAJOR(linkedSdlVersion), SDL_VERSIONNUM_MINOR(linkedSdlVersion), SDL_VERSIONNUM_MICRO(linkedSdlVersion));
 
-	sdlGetWindowProps = (FnSdlGetWindowProperties) GetProcAddress(s3, "SDL_GetWindowProperties");
-	sdlGetPointerProp = (FnSdlGetPointerProperty) GetProcAddress(s3, "SDL_GetPointerProperty");
-	sdlGetSizePx = (FnSdlGetWindowSizeInPixels) GetProcAddress(s3, "SDL_GetWindowSizeInPixels");
-	sdlShowCursor = (FnSdlCursor) GetProcAddress(s3, "SDL_ShowCursor");
-	sdlHideCursor = (FnSdlCursor) GetProcAddress(s3, "SDL_HideCursor");
-	mod::Log(category, "worker: GetWindowProperties={} GetPointerProperty={} GetWindowSizeInPixels={} ShowCursor={} HideCursor={}",
-		(void*) sdlGetWindowProps, (void*) sdlGetPointerProp,
-		(void*) sdlGetSizePx, (void*) sdlShowCursor, (void*) sdlHideCursor);
-	uintptr_t real = (uintptr_t) GetProcAddress(s3, "SDL_GL_SwapWindow");
-	mod::Log(category, "SDL_GL_SwapWindow = {}", (void*) real);
-	if (!real)
+	// To get the address to the resolved imported function we get the address to the linked function (which actually points to the iat stub)
+	// and then dereference it - msvc assumes we want the address to the linked function - https://devblogs.microsoft.com/oldnewthing/20060721-06/?p=30433/
+	uintptr_t swapWindowAddress = (uintptr_t) *(void**)(&SDL_GL_SwapWindow);
+	mod::Log(category, "SDL_GL_SwapWindow = {}", (void*) swapWindowAddress);
+	if (!swapWindowAddress)
 	{
-		mod::Log(category, "GetProcAddress failed ({})", GetLastError());
+		mod::Log(category, "SDL_GL_SwapWindow not resolved ({})", GetLastError());
 		return false;
 	}
 
@@ -344,7 +312,7 @@ bool overlay::Init()
 		uintptr_t* end = (uintptr_t*) (reinterpret_cast<uintptr_t>(ad2::ad2Module) + 0x47eba0);
 		for (uintptr_t* it = begin; it < end; it++)
 		{
-			if (*it == real)
+			if (*it == swapWindowAddress)
 			{
 				slot = it;
 				break;
@@ -393,7 +361,7 @@ void overlay::Loop()
 			showUi = !showUi;
 			if (showUi)
 			{
-				if (sdlShowCursor) sdlShowCursor(1);
+				SDL_ShowCursor();
 				/* put the cursor somewhere visible: screen center */
 				POINT c;
 				GetCursorPos(&c);
@@ -401,7 +369,7 @@ void overlay::Loop()
 			}
 			else
 			{
-				if (sdlHideCursor) sdlHideCursor(0);
+				SDL_HideCursor();
 			}
 			mod::Log(category, "UI {}", showUi ? "shown (cursor on, centered)" : "hidden (cursor off)");
 		}

@@ -80,6 +80,7 @@ namespace
 			return false;
 		}
 
+		// TODO: Investigate smarter IAT reading (https://f3real.github.io/iat_hooking.html) (https://medium.com/@s12deff/import-address-table-hooking-68d519a1da43)
 		// Scan the whole IAT region
 		for (ad2::MemoryOffset slotOffset = ad2::addresses::iatRegionStart; slotOffset < ad2::addresses::iatRegionEnd; slotOffset += 8)
 		{

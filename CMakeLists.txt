@@ -13,6 +13,7 @@ endif ()
 find_package(minhook CONFIG REQUIRED)
 find_package(enchantum CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
+find_package(SDL3 CONFIG REQUIRED)
 
 # Overlay -> steam_api64 proxy
 add_library(steam_api64 SHARED
@@ -28,4 +29,4 @@ add_library(steam_api64 SHARED
 set_property(TARGET steam_api64 PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL") # MSVC DLL
 target_compile_options(steam_api64 PRIVATE /W4 /utf-8)
 target_compile_definitions(steam_api64 PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN) # Windows header include options
-target_link_libraries(steam_api64 PRIVATE imgui::imgui minhook::minhook enchantum::enchantum opengl32 user32 gdi32 shell32 kernel32)
+target_link_libraries(steam_api64 PRIVATE imgui::imgui minhook::minhook enchantum::enchantum SDL3::SDL3 opengl32 user32 gdi32 shell32 kernel32)
