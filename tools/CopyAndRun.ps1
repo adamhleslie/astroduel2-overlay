@@ -6,6 +6,7 @@
     .\script.ps1 "<Astro Duel 2 Directory>" [-Configuration <Debug|Release>] [-NoRun]
 #>
 
+# TODO: Add a hash test of the .exe and .dll to ensure no updates have occurred
 param(
     [Parameter(Mandatory = $true, Position = 0)]
     [string]$TargetPath, # required: the Astro Duel 2 directory

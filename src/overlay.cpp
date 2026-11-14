@@ -24,13 +24,15 @@
 #include <SDL3/SDL_version.h>
 
 #include "mod.h"
+#include "hooks_iat.h"
 #include "level_pool.h"
 
 namespace
 {
 	constexpr std::string_view category = "imgui";
 
-	int (*origSwap)(void*) = nullptr; /* original SDL_GL_SwapWindow */
+	decltype(&SDL_GL_SwapWindow) swapWindowOrig = nullptr;
+
 	SDL_Window* sdlWindow = nullptr;
 	const char hwndPropKey[] = "SDL.window.win32.hwnd";
 	volatile LONG hookInstalled = 0;
@@ -250,7 +252,7 @@ namespace
 	}
 
 	/* the hook: same ABI as SDL_GL_SwapWindow(SDL_Window*) -> int */
-	int Ad2HookedSwap(void* window)
+	bool Ad2HookedSwap(SDL_Window* window)
 	{
 		if (hookInstalled)
 		{
@@ -282,7 +284,7 @@ namespace
 				ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 			}
 		}
-		return origSwap ? origSwap(window) : 0;
+		return swapWindowOrig ? swapWindowOrig(window) : 0;
 	}
 }
 
@@ -292,57 +294,15 @@ bool overlay::Init()
 	const int linkedSdlVersion = SDL_GetVersion();
 	mod::Log("sdl", "SDL_GetVersion: {}.{}.{}", SDL_VERSIONNUM_MAJOR(linkedSdlVersion), SDL_VERSIONNUM_MINOR(linkedSdlVersion), SDL_VERSIONNUM_MICRO(linkedSdlVersion));
 
-	// To get the address to the resolved imported function we get the address to the linked function (which actually points to the iat stub)
-	// and then dereference it - msvc assumes we want the address to the linked function - https://devblogs.microsoft.com/oldnewthing/20060721-06/?p=30433/
-	uintptr_t swapWindowAddress = (uintptr_t) *(void**)(&SDL_GL_SwapWindow);
-	mod::Log(category, "SDL_GL_SwapWindow = {}", (void*) swapWindowAddress);
-	if (!swapWindowAddress)
+	if (!hooks::iat::HookIatForModule("SDL3.dll", NAME_OF(SDL_GL_SwapWindow), Ad2HookedSwap, swapWindowOrig))
 	{
-		mod::Log(category, "SDL_GL_SwapWindow not resolved ({})", GetLastError());
 		return false;
 	}
 
-	// TODO: Use hooks_iat
-	/* scan the static-IAT region (RVA 0x47e028..0x47eba0) for the slot.
-	   The game may fill slots at load or resolve later; retry until found. */
-	uintptr_t* slot = nullptr;
-	for (int attempt = 0; attempt < 100 && !slot; attempt++)
-	{
-		uintptr_t* begin = (uintptr_t*) (reinterpret_cast<uintptr_t>(ad2::ad2Module) + 0x47e028);
-		uintptr_t* end = (uintptr_t*) (reinterpret_cast<uintptr_t>(ad2::ad2Module) + 0x47eba0);
-		for (uintptr_t* it = begin; it < end; it++)
-		{
-			if (*it == swapWindowAddress)
-			{
-				slot = it;
-				break;
-			}
-		}
-		if (!slot) Sleep(200);
-	}
-	if (!slot)
-	{
-		mod::Log(category, "IAT slot for SwapWindow NOT FOUND in 0x47e028..0x47eba0");
-		return false;
-	}
-	mod::Log(category, "IAT slot at {} (content={})", (void*) slot, (void*) *slot);
-
-	/* IAT lives in .rdata (read-only) -- flip the page, patch, restore. */
-	origSwap = (int(*)(void*)) *slot;
-	uintptr_t page = (uintptr_t) slot & ~(uintptr_t) 0xFFF;
-	DWORD oldProt = 0;
-	if (!VirtualProtect((LPVOID) page, 0x1000, PAGE_READWRITE, &oldProt))
-	{
-		mod::Log(category, "VirtualProtect({}) FAILED: {}", (void*) page, GetLastError());
-		return false;
-	}
-	*slot = (uintptr_t) Ad2HookedSwap;
-	DWORD dummy = 0;
-	VirtualProtect((LPVOID) page, 0x1000, oldProt, &dummy);
+	// TODO: std::atomic
 	InterlockedExchange(&hookInstalled, 1);
-	mod::Log(category, "HOOK INSTALLED (orig={}, page {} prot {:#x}->restored)",
-	         (void*) origSwap, (void*) page, oldProt);
-	mod::Log(category, "level-pool overlay ready (Ctrl+Alt+U toggles UI)\n");
+	mod::Log(category, "Overlay initialized");
+
 	return true;
 }
 

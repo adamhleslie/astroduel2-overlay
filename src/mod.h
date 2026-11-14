@@ -1,11 +1,5 @@
 #pragma once
 
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
 #include <windows.h>
 #include <knownfolders.h>
 #include <shtypes.h>
@@ -14,6 +8,9 @@
 #include <chrono>
 #include <format>
 #include <enchantum/std_format.hpp>
+
+// TODO: Put this somewhere
+#define NAME_OF(x) #x
 
 // Core of the mod, including the Main function and logging functionality
 namespace mod

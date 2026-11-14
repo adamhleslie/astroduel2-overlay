@@ -1,12 +1,12 @@
 // Import Address Table (IAT) hooks used for runtime logging
 #include "hooks_iat.h"
 
-#include <cstdio>
+#include <fileapi.h>
+#include <shlobj_core.h>
 
 #include "ad2.h"
 #include "ad2_addresses.h"
 #include "mod.h"
-#include "shlobj_core.h"
 
 namespace
 {
@@ -14,16 +14,13 @@ namespace
 	constexpr std::string_view gameCategory = "game";
 
 	// https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew
-	typedef HANDLE (WINAPI *FnCreateFileW)(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
-	FnCreateFileW createFileWOrig = nullptr;
+	decltype(&CreateFileW) createFileWOrig = nullptr;
 
 	// https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfileattributesw
-	typedef DWORD (WINAPI *FnGetFileAttributesW)(LPCWSTR);
-	FnGetFileAttributesW getFileAttributesWOrig = nullptr;
+	decltype(&GetFileAttributesW) getFileAttributesWOrig = nullptr;
 
 	// https://learn.microsoft.com/en-us/windows/win32/api/shlobj_core/nf-shlobj_core-shgetknownfolderpath
-	typedef HRESULT (WINAPI *FnShellGetKnownFolder)(REFKNOWNFOLDERID, DWORD, HANDLE, PWSTR*);
-	FnShellGetKnownFolder shellGetKnownFolderOrig = nullptr;
+	decltype(&SHGetKnownFolderPath) shGetKnownFolderOrig = nullptr;
 
 	// TODO: Make more performant
 	std::string LPCWSTRToString(LPCWSTR lpStr)
@@ -35,7 +32,7 @@ namespace
 	}
 
 	HANDLE WINAPI CreateFileWHook(LPCWSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode, LPSECURITY_ATTRIBUTES lpSecurityAttributes,
-										DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes, HANDLE hTemplateFile)
+		DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes, HANDLE hTemplateFile)
 	{
 		HANDLE result = createFileWOrig(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
 		mod::Log(gameCategory, "CreateFileW {} (result={}, error={})", LPCWSTRToString(lpFileName), result, GetLastError());
@@ -49,7 +46,7 @@ namespace
 		return result;
 	}
 
-	HRESULT WINAPI ShellGetKnownFolderPathHook(REFKNOWNFOLDERID rfid, DWORD dwFlags, HANDLE hToken, PWSTR* ppszPath)
+	HRESULT WINAPI SHGetKnownFolderPathHook(REFKNOWNFOLDERID rfid, DWORD dwFlags, HANDLE hToken, PWSTR* ppszPath)
 	{
 		// Convert rfid to string
 		constexpr int guidCharMax = 40;
@@ -58,7 +55,7 @@ namespace
 		char guidString[guidCharMax] = {};
 		WideCharToMultiByte(CP_ACP, 0, guidStringW, -1, guidString, guidCharMax, nullptr, nullptr);
 
-		HRESULT result = shellGetKnownFolderOrig(rfid, dwFlags, hToken, ppszPath);
+		HRESULT result = shGetKnownFolderOrig(rfid, dwFlags, hToken, ppszPath);
 		if (result == S_OK && ppszPath && *ppszPath)
 		{
 			mod::Log(gameCategory, "SHGetKnownFolderPath {} -> {}", guidString, LPCWSTRToString(*ppszPath));
@@ -70,71 +67,48 @@ namespace
 
 		return result;
 	}
-
-	// Overwrites an address in the game's import address table.
-	bool HookIat(uintptr_t address, uintptr_t hookAddress, const char* name)
-	{
-		if (!address)
-		{
-			mod::Log(category, " {} - address is null", name);
-			return false;
-		}
-
-		// TODO: Investigate smarter IAT reading (https://f3real.github.io/iat_hooking.html) (https://medium.com/@s12deff/import-address-table-hooking-68d519a1da43)
-		// Scan the whole IAT region
-		for (ad2::MemoryOffset slotOffset = ad2::addresses::iatRegionStart; slotOffset < ad2::addresses::iatRegionEnd; slotOffset += 8)
-		{
-			uintptr_t* slotAddress = ad2::MemoryOffset{slotOffset}.ToAddress<uintptr_t>();
-			if (*slotAddress == address)
-			{
-				DWORD newProtect = PAGE_READWRITE;
-				DWORD oldProtect = 0;
-				if (!VirtualProtect(slotAddress, 8, newProtect, &oldProtect))
-				{
-					mod::Log(category, " {} - VirtualProtect FAILED {}", name, GetLastError());
-					return false;
-				}
-				*slotAddress = hookAddress;
-				VirtualProtect(slotAddress, 8, oldProtect, &newProtect);
-				mod::Log(category, " {} - PATCHED slot @base0x+{} (orig={})", name, slotOffset, reinterpret_cast<void*>(address));
-				return true;
-			}
-		}
-		mod::Log(category, " {} - slot NOT FOUND in IAT {}..{}", name, ad2::addresses::iatRegionStart, ad2::addresses::iatRegionEnd);
-		return false;
-	}
-
-	template <typename T>
-	bool HookIatForModule(LPCSTR module, LPCSTR name, T hookAddress, T& replacedAddress)
-	{
-		HMODULE handle = GetModuleHandleA(module);
-		uintptr_t address = handle ? reinterpret_cast<uintptr_t>(GetProcAddress(handle, name)) : 0;
-		if (HookIat(address, reinterpret_cast<uintptr_t>(hookAddress), name))
-		{
-			replacedAddress = reinterpret_cast<T>(address);
-			return true;
-		}
-		else
-		{
-			replacedAddress = nullptr;
-			return false;
-		}
-	}
-
-	// Kernel DLL Hook variant: the game's slots may hold the kernelbase target or the kernel32 forwarder
-	template <typename T>
-	bool HookIatForKernelDll(LPCSTR name, T hookAddress, T& replacedAddress)
-	{
-		return HookIatForModule("kernel32.dll", name, hookAddress, replacedAddress) ||
-			   HookIatForModule("kernelbase.dll", name, hookAddress, replacedAddress);
-	}
 }
 
 void hooks::iat::InstallHooks()
 {
-	HookIatForKernelDll("CreateFileW", CreateFileWHook, createFileWOrig);
-	HookIatForKernelDll("GetFileAttributesW", GetFileAttributesWHook, getFileAttributesWOrig);
-	HookIatForModule("shell32.dll", "SHGetKnownFolderPath", ShellGetKnownFolderPathHook, shellGetKnownFolderOrig);
-	mod::Log(category, " Original Addresses - createFileW={} getFileAttributesW={} getKnownFolderPath={}",
-		reinterpret_cast<void*>(createFileWOrig), reinterpret_cast<void*>(getFileAttributesWOrig), reinterpret_cast<void*>(shellGetKnownFolderOrig));
+	HookIatForKernel(NAME_OF(CreateFileW), CreateFileWHook, createFileWOrig);
+	HookIatForKernel(NAME_OF(GetFileAttributesW), GetFileAttributesWHook, getFileAttributesWOrig);
+	HookIatForModule("shell32.dll", NAME_OF(SHGetKnownFolderPath), SHGetKnownFolderPathHook, shGetKnownFolderOrig);
+	mod::Log(category, " Original Addresses - CreateFileW={} GetFileAttributesW={} SHGetKnownFolderPath={}",
+		reinterpret_cast<void*>(createFileWOrig), reinterpret_cast<void*>(getFileAttributesWOrig), reinterpret_cast<void*>(shGetKnownFolderOrig));
+}
+
+bool hooks::iat::HookIat(uintptr_t address, uintptr_t hookAddress, const std::string& name)
+{
+	if (!address)
+	{
+		mod::Log(category, " {} - address is null", name);
+		return false;
+	}
+
+	// TODO: Investigate smarter IAT reading
+	// https://f3real.github.io/iat_hooking.html
+	// https://medium.com/@s12deff/import-address-table-hooking-68d519a1da43
+	// https://skr1x.github.io/portable-executable-format/ & https://skr1x.github.io/reflective-loading-portable-executable-memory/
+	// Scan the whole IAT region
+	for (ad2::MemoryOffset slotOffset = ad2::addresses::iatRegionStart; slotOffset < ad2::addresses::iatRegionEnd; slotOffset += 8)
+	{
+		uintptr_t* slotAddress = slotOffset.ToAddress<uintptr_t>();
+		if (*slotAddress == address)
+		{
+			DWORD newProtect = PAGE_READWRITE;
+			DWORD oldProtect = 0;
+			if (!VirtualProtect(slotAddress, 8, newProtect, &oldProtect))
+			{
+				mod::Log(category, " {} - VirtualProtect FAILED {}", name, GetLastError());
+				return false;
+			}
+			*slotAddress = hookAddress;
+			VirtualProtect(slotAddress, 8, oldProtect, &newProtect);
+			mod::Log(category, " {} - PATCHED slot @base0x+{} (orig={})", name, slotOffset, reinterpret_cast<void*>(address));
+			return true;
+		}
+	}
+	mod::Log(category, " {} - slot NOT FOUND in IAT {}..{}", name, ad2::addresses::iatRegionStart, ad2::addresses::iatRegionEnd);
+	return false;
 }
