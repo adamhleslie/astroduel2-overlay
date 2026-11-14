@@ -353,10 +353,7 @@ void level_pool::DrawUi()
 
 void level_pool::Init()
 {
-	if (isInitialized.load())
-	{
-		return;
-	}
+	assert(!isInitialized.load());
 
 	// Default initialize worldIndexByType to invalid value (size_t)-1
 	worldIndexByType.fill(static_cast<size_t>(-1));

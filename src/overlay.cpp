@@ -22,6 +22,7 @@
 #include <imgui_impl_opengl3_loader.h>
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_version.h>
+#include <atomic>
 
 #include "mod.h"
 #include "hooks_iat.h"
@@ -29,13 +30,13 @@
 
 namespace
 {
-	constexpr std::string_view category = "imgui";
+	constexpr std::string_view category = "overlay";
 
 	decltype(&SDL_GL_SwapWindow) swapWindowOrig = nullptr;
 
 	SDL_Window* sdlWindow = nullptr;
 	const char hwndPropKey[] = "SDL.window.win32.hwnd";
-	volatile LONG hookInstalled = 0;
+	std::atomic_bool isInitialized{false};
 
 	bool imguiReady = false;
 	HWND hwnd = nullptr;
@@ -254,7 +255,7 @@ namespace
 	/* the hook: same ABI as SDL_GL_SwapWindow(SDL_Window*) -> int */
 	bool Ad2HookedSwap(SDL_Window* window)
 	{
-		if (hookInstalled)
+		if (isInitialized.load())
 		{
 			/* the hook parameter IS the game's SDL_Window -- authoritative HWND
 			   source (better than window enumeration). Read it via SDL3's
@@ -290,19 +291,19 @@ namespace
 
 bool overlay::Init()
 {
+	assert(!isInitialized.load());
+
 	// Version as reported by the live library
 	const int linkedSdlVersion = SDL_GetVersion();
-	mod::Log("sdl", "SDL_GetVersion: {}.{}.{}", SDL_VERSIONNUM_MAJOR(linkedSdlVersion), SDL_VERSIONNUM_MINOR(linkedSdlVersion), SDL_VERSIONNUM_MICRO(linkedSdlVersion));
+	mod::Log(category, "SDL_GetVersion: {}.{}.{}", SDL_VERSIONNUM_MAJOR(linkedSdlVersion), SDL_VERSIONNUM_MINOR(linkedSdlVersion), SDL_VERSIONNUM_MICRO(linkedSdlVersion));
 
 	if (!hooks::iat::HookIatForModule("SDL3.dll", NAME_OF(SDL_GL_SwapWindow), Ad2HookedSwap, swapWindowOrig))
 	{
 		return false;
 	}
 
-	// TODO: std::atomic
-	InterlockedExchange(&hookInstalled, 1);
 	mod::Log(category, "Overlay initialized");
-
+	isInitialized.store(true);
 	return true;
 }
 
