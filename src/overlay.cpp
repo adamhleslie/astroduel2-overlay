@@ -1,18 +1,8 @@
 /* Render strategy:
-*   - Worker thread (DllMain-spawned) waits for the game to settle, then
-*     IAT-hooks SDL_GL_SwapWindow: the game's IAT import directory is
-*     packer-forged, so we do NOT parse the PE. Instead:
-*         real_addr = *(void**)(&SDL_GL_SwapWindow)   // our resolved IAT slot
-*         slot      = scan known IAT region (RVA 0x47e028..0x47eba0) for == real_addr
-*     and patch that one slot to point at our hook.
-*   - The hook runs ON THE GAME'S RENDER THREAD, where the game's GL context
-*     is current -- exactly where we want to draw.
-*   - Lazy-inits ImGui (desktop GL backend, built-in gl3w-stripped loader,
-*     GLSL "#version 120" for the game's 2.1-compat context) on first swap.
-*   - Input: manual Win32 (GetCursorPos/ScreenToClient + GetAsyncKeyState),
-*     no WndProc subclassing. Reads are non-consuming, so the game still gets
-*     W/X/Y for its own level picker.
-*   - UI toggle: Ctrl+Alt+U (polled in worker thread, edge-triggered).
+*   - IAT-hooks SDL_GL_SwapWindow on the game's render thread
+*   - Lazy-inits ImGui (GLSL "#version 120" for the game's 2.1-compat context) on first swap
+*   - Input: manual Win32 (GetCursorPos/ScreenToClient + GetAsyncKeyState)
+*   - UI toggle: Ctrl+Alt+U (polled in worker thread, edge-triggered)
 */
 #include "overlay.h"
 
@@ -22,7 +12,6 @@
 #include <imgui_impl_opengl3_loader.h>
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_version.h>
-#include <atomic>
 
 #include "mod.h"
 #include "hooks_iat.h"
@@ -31,15 +20,17 @@
 namespace
 {
 	constexpr std::string_view category = "overlay";
+	constexpr std::string_view windowHandlePropertyKey = "SDL.window.win32.hwnd";
+	constexpr std::string_view glslVersion = "#version 120";
+	constexpr int imguiWindowRounding = 4;
 
-	decltype(&SDL_GL_SwapWindow) swapWindowOrig = nullptr;
-
+	decltype(&SDL_GL_SwapWindow) sdl_gl_swapWindowOrig = nullptr;
+	decltype(&SDL_GL_CreateContext) sdl_gl_createContextOrig = nullptr;
 	SDL_Window* sdlWindow = nullptr;
-	const char hwndPropKey[] = "SDL.window.win32.hwnd";
-	std::atomic_bool isInitialized{false};
+	bool isInitialized = false;
 
-	bool imguiReady = false;
-	HWND hwnd = nullptr;
+	bool isImguiInitialized = false;
+	HWND windowHandle = nullptr;
 	int frame = 0;
 	bool glInfoLogged = false;
 	bool showUi = false; /* Ctrl+Alt+U toggles (off by default) */
@@ -81,70 +72,10 @@ namespace
 
 	HWND FindGameWindow()
 	{
+		mod::Log("DEBUG", "FALLBACK GAME WINDOW SEARCH");
 		WinCand best = {nullptr, -1};
 		EnumWindows(EnumWinProc, (LPARAM) &best);
 		return best.h;
-	}
-
-	/* ------------------------------------------------------------------ */
-	/* hook                                                                */
-	/* ------------------------------------------------------------------ */
-	void ImGuiInit()
-	{
-		mod::Log(category, "hwnd={} dc={}", (void*)hwnd, (void*)wglGetCurrentDC());
-		if (!hwnd) return;
-		if (!wglGetCurrentDC())
-		{
-			mod::Log(category, "no GL context yet, deferring");
-			return;
-		}
-
-		IMGUI_CHECKVERSION();
-		ImGui::CreateContext();
-		ImGuiIO& io = ImGui::GetIO();
-		io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-
-		/* io.DisplaySize defaults to (-1,-1) in 1.90.9 -- seed a valid value so
-		   even a NewFrame before FeedInput could not assert. */
-		{
-			RECT rc = {0, 0, 0, 0};
-			if (GetClientRect(hwnd, &rc) && rc.right > 0 && rc.bottom > 0)
-				io.DisplaySize = ImVec2((float) rc.right, (float) rc.bottom);
-			else
-				io.DisplaySize = ImVec2(1920.0f, 1080.0f);
-		}
-
-		/* HiDPI: we lay out in PHYSICAL pixels (DisplaySize = GL viewport, e.g.
-		   3840x2160) with FramebufferScale (1,1). The default 13px font is then
-		   physically tiny at 4K. Rasterize the font at the monitor's DPI so the
-		   UI is physically sized right (13px * 2.0 = 26px at 200%). GetClientRect
-		   is unreliable on the SDL fullscreen window, so read DPI from the hwnd. */
-		{
-			HWND w = hwnd ? hwnd : NULL;
-			HDC hdc = GetDC(w);
-			int dpi = (hdc ? GetDeviceCaps(hdc, LOGPIXELSX) : 96);
-			if (hdc) ReleaseDC(w, hdc);
-			if (dpi <= 0) dpi = 96;
-			float scale = dpi / 96.0f;
-			if (scale < 1.0f) scale = 1.0f;
-			ImFontConfig fc;
-			fc.SizePixels = 13.0f * scale;
-			io.Fonts->AddFontDefault(&fc);
-			mod::Log(category, "dpi={} scale={:.2f} font={:.0f}px", dpi, scale, fc.SizePixels);
-		}
-
-		ImGuiStyle& st = ImGui::GetStyle();
-		st.WindowRounding = 4.0f;
-
-		/* GLSL 120: the game gates on "Ready for OpenGL 2.1"; #version 120
-		   compiles on 2.1 compat and desktop 3.x alike. */
-		if (!ImGui_ImplOpenGL3_Init("#version 120"))
-		{
-			mod::Log(category, "ImGui_ImplOpenGL3_Init FAILED (shader compile?)");
-			return;
-		}
-		imguiReady = true;
-		mod::Log(category, "OK (GLSL #version 120)");
 	}
 
 	void FeedInput()
@@ -164,7 +95,7 @@ namespace
 		int vw[4] = {0, 0, 0, 0};
 		glGetIntegerv(GL_VIEWPORT, vw);
 		RECT rc = {0, 0, 0, 0};
-		GetClientRect(hwnd, &rc);
+		GetClientRect(windowHandle, &rc);
 		int sw = 0, sh = 0;
 		if (sdlWindow) SDL_GetWindowSizeInPixels(sdlWindow, &sw, &sh);
 		// bool s_size_logged = false;
@@ -185,7 +116,7 @@ namespace
 		/* mouse pos (client coords, scaled logical->physical) */
 		POINT p;
 		GetCursorPos(&p);
-		ScreenToClient(hwnd, &p);
+		ScreenToClient(windowHandle, &p);
 		{
 			float sx = (rc.right > 0) ? io.DisplaySize.x / (float) rc.right : 1.0f;
 			float sy = (rc.bottom > 0) ? io.DisplaySize.y / (float) rc.bottom : 1.0f;
@@ -246,64 +177,100 @@ namespace
 		ImGui::Begin("ad2mod overlay", nullptr, ImGuiWindowFlags_NoCollapse);
 		ImGui::Separator();
 
-		/* ---------------- versus level-pool editor ---------------- */
-
+		// Level Pool Editor
 		level_pool::DrawUi();
+
 		ImGui::End();
 	}
 
-	/* the hook: same ABI as SDL_GL_SwapWindow(SDL_Window*) -> int */
-	bool Ad2HookedSwap(SDL_Window* window)
+	SDL_GLContext SDL_GL_CreateContextHook(SDL_Window* window)
 	{
-		if (isInitialized.load())
+		assert(sdl_gl_createContextOrig);
+		SDL_GLContext glContext = sdl_gl_createContextOrig(window);
+		if (!glContext)
 		{
-			/* the hook parameter IS the game's SDL_Window -- authoritative HWND
-			   source (better than window enumeration). Read it via SDL3's
-			   property API: GetWindowProperties -> GetPointerProperty("...hwnd") */
-			if (window) sdlWindow = (SDL_Window*) window;
-			if (!hwnd && window)
-			{
-				SDL_PropertiesID props = SDL_GetWindowProperties(sdlWindow);
-				if (props) hwnd = (HWND) SDL_GetPointerProperty(props, hwndPropKey, nullptr);
-			}
-			if (!hwnd) hwnd = FindGameWindow(); /* last-resort fallback */
-			if (!imguiReady) ImGuiInit();
-			if (imguiReady)
-			{
-				frame++;
-				ImGui_ImplOpenGL3_NewFrame();
-				FeedInput(); /* update io.DisplaySize + queue input BEFORE NewFrame */
-				if (!glInfoLogged)
-				{
-					glInfoLogged = true;
-					mod::Log(category, "window={} display={}x{}", (void*) window,
-					         (int) ImGui::GetIO().DisplaySize.x, (int) ImGui::GetIO().DisplaySize.y);
-				}
-				ImGui::NewFrame();
-				if (showUi) DrawUi();
-				ImGui::Render();
-				ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-			}
+			mod::Log(category, "ERROR - CreateContext failed");
+			return glContext;
 		}
-		return swapWindowOrig ? swapWindowOrig(window) : 0;
+
+		// Cache window info
+		sdlWindow = window;
+		SDL_PropertiesID properties = SDL_GetWindowProperties(window);
+		if (!properties)
+		{
+			mod::Log(category, "ERROR - Could not get window properties");
+			return glContext;
+		}
+		windowHandle = static_cast<HWND>(SDL_GetPointerProperty(properties, windowHandlePropertyKey.data(), nullptr));
+
+		// Initialize imgui
+		if (!IMGUI_CHECKVERSION())
+		{
+			mod::Log(category, "ERROR - imgui version mismatch");
+			return glContext;
+		}
+
+		ImGui::CreateContext();
+		ImGuiIO& io = ImGui::GetIO();
+		io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+
+		ImGuiStyle& st = ImGui::GetStyle();
+		st.WindowRounding = imguiWindowRounding;
+
+		if (!ImGui_ImplOpenGL3_Init(glslVersion.data()))
+		{
+			mod::Log(category, "ERROR - ImGui_ImplOpenGL3_Init failed for version \"{}\"", glslVersion);
+			return glContext;
+		}
+
+		isImguiInitialized = true;
+		return glContext;
+	}
+
+	bool SDL_GL_SwapWindowHook(SDL_Window* window)
+	{
+		assert(sdl_gl_swapWindowOrig);
+		if (window && isImguiInitialized)
+		{
+			++frame;
+			ImGui_ImplOpenGL3_NewFrame();
+			FeedInput(); /* update io.DisplaySize + queue input BEFORE NewFrame */
+			if (!glInfoLogged)
+			{
+				glInfoLogged = true;
+				mod::Log(category, "window={} display={}x{}", (void*) window, (int) ImGui::GetIO().DisplaySize.x, (int) ImGui::GetIO().DisplaySize.y);
+			}
+			ImGui::NewFrame();
+			if (showUi) DrawUi();
+			ImGui::Render();
+			ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+		}
+
+		return sdl_gl_swapWindowOrig(window);
 	}
 }
 
 bool overlay::Init()
 {
-	assert(!isInitialized.load());
+	assert(!isInitialized);
 
-	// Version as reported by the live library
-	const int linkedSdlVersion = SDL_GetVersion();
-	mod::Log(category, "SDL_GetVersion: {}.{}.{}", SDL_VERSIONNUM_MAJOR(linkedSdlVersion), SDL_VERSIONNUM_MINOR(linkedSdlVersion), SDL_VERSIONNUM_MICRO(linkedSdlVersion));
+	const int sdlVersion = SDL_GetVersion();
+	mod::Log(category, "SDL Version: {}.{}.{}", SDL_VERSIONNUM_MAJOR(sdlVersion), SDL_VERSIONNUM_MINOR(sdlVersion), SDL_VERSIONNUM_MICRO(sdlVersion));
 
-	if (!hooks::iat::HookIatForModule("SDL3.dll", NAME_OF(SDL_GL_SwapWindow), Ad2HookedSwap, swapWindowOrig))
+	// Hook the game's CreateContext function
+	if (!hooks::iat::HookIatForModule("SDL3.dll", NAME_OF(SDL_GL_CreateContext), SDL_GL_CreateContextHook, sdl_gl_createContextOrig))
 	{
 		return false;
 	}
 
+	// Hook the game's SwapWindow function
+	if (!hooks::iat::HookIatForModule("SDL3.dll", NAME_OF(SDL_GL_SwapWindow), SDL_GL_SwapWindowHook, sdl_gl_swapWindowOrig))
+	{
+		return false;
+	}
+
+	isInitialized = true;
 	mod::Log(category, "Overlay initialized");
-	isInitialized.store(true);
 	return true;
 }
 
@@ -311,11 +278,9 @@ void overlay::Loop()
 {
 	/* hotkey poll: Ctrl+Alt+U toggles UI */
 	bool prev = false;
-	// int tick = 0;
 	for (;;)
 	{
 		Sleep(80);
-		// if ((++tick % 62) == 0) VerifyEntryHooks();    /* ~5s: entries still ours? */
 		bool d = KeyDown(VK_CONTROL) && KeyDown(VK_MENU) && KeyDown('U');
 		if (d && !prev)
 		{

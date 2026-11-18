@@ -34,6 +34,7 @@ namespace
 	HANDLE WINAPI CreateFileWHook(LPCWSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode, LPSECURITY_ATTRIBUTES lpSecurityAttributes,
 		DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes, HANDLE hTemplateFile)
 	{
+		assert(createFileWOrig);
 		HANDLE result = createFileWOrig(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
 		mod::Log(gameCategory, "CreateFileW {} (result={}, error={})", LPCWSTRToString(lpFileName), result, GetLastError());
 		return result;
@@ -41,6 +42,7 @@ namespace
 
 	DWORD WINAPI GetFileAttributesWHook(LPCWSTR lpFileName)
 	{
+		assert(getFileAttributesWOrig);
 		DWORD result = getFileAttributesWOrig(lpFileName);
 		mod::Log(gameCategory, "GetFileAttributesW {} (result={:#x}{}, error={})", LPCWSTRToString(lpFileName), result, (result == INVALID_FILE_ATTRIBUTES ? " NOT-FOUND" : ""), GetLastError());
 		return result;
@@ -48,6 +50,8 @@ namespace
 
 	HRESULT WINAPI SHGetKnownFolderPathHook(REFKNOWNFOLDERID rfid, DWORD dwFlags, HANDLE hToken, PWSTR* ppszPath)
 	{
+		assert(shGetKnownFolderOrig);
+
 		// Convert rfid to string
 		constexpr int guidCharMax = 40;
 		OLECHAR guidStringW[guidCharMax] = {};
@@ -74,15 +78,13 @@ void hooks::iat::InstallHooks()
 	HookIatForKernel(NAME_OF(CreateFileW), CreateFileWHook, createFileWOrig);
 	HookIatForKernel(NAME_OF(GetFileAttributesW), GetFileAttributesWHook, getFileAttributesWOrig);
 	HookIatForModule("shell32.dll", NAME_OF(SHGetKnownFolderPath), SHGetKnownFolderPathHook, shGetKnownFolderOrig);
-	mod::Log(category, " Original Addresses - CreateFileW={} GetFileAttributesW={} SHGetKnownFolderPath={}",
-		reinterpret_cast<void*>(createFileWOrig), reinterpret_cast<void*>(getFileAttributesWOrig), reinterpret_cast<void*>(shGetKnownFolderOrig));
 }
 
 bool hooks::iat::HookIat(uintptr_t address, uintptr_t hookAddress, const std::string& name)
 {
 	if (!address)
 	{
-		mod::Log(category, " {} - address is null", name);
+		mod::Log(category, "{} - address is null", name);
 		return false;
 	}
 
@@ -100,15 +102,15 @@ bool hooks::iat::HookIat(uintptr_t address, uintptr_t hookAddress, const std::st
 			DWORD oldProtect = 0;
 			if (!VirtualProtect(slotAddress, 8, newProtect, &oldProtect))
 			{
-				mod::Log(category, " {} - VirtualProtect FAILED {}", name, GetLastError());
+				mod::Log(category, "{} - VirtualProtect FAILED {}", name, GetLastError());
 				return false;
 			}
 			*slotAddress = hookAddress;
 			VirtualProtect(slotAddress, 8, oldProtect, &newProtect);
-			mod::Log(category, " {} - PATCHED slot @base0x+{} (orig={})", name, slotOffset, reinterpret_cast<void*>(address));
+			mod::Log(category, "{} - PATCHED slot @base0x+{} (orig={})", name, slotOffset, reinterpret_cast<void*>(address));
 			return true;
 		}
 	}
-	mod::Log(category, " {} - slot NOT FOUND in IAT {}..{}", name, ad2::addresses::iatRegionStart, ad2::addresses::iatRegionEnd);
+	mod::Log(category, "{} - slot NOT FOUND in IAT {}..{}", name, ad2::addresses::iatRegionStart, ad2::addresses::iatRegionEnd);
 	return false;
 }
