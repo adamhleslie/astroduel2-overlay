@@ -26,10 +26,10 @@ namespace
 
 	decltype(&SDL_GL_SwapWindow) sdl_gl_swapWindowOrig = nullptr;
 	decltype(&SDL_GL_CreateContext) sdl_gl_createContextOrig = nullptr;
-	SDL_Window* sdlWindow = nullptr;
-	bool isInitialized = false;
 
+	bool isInitialized = false;
 	bool isImguiInitialized = false;
+	SDL_Window* sdlWindow = nullptr;
 	HWND windowHandle = nullptr;
 	int frame = 0;
 	bool glInfoLogged = false;
@@ -203,23 +203,33 @@ namespace
 		}
 		windowHandle = static_cast<HWND>(SDL_GetPointerProperty(properties, windowHandlePropertyKey.data(), nullptr));
 
-		// Initialize imgui
 		if (!IMGUI_CHECKVERSION())
 		{
 			mod::Log(category, "ERROR - imgui version mismatch");
 			return glContext;
 		}
 
+		// Setup Dear ImGui context
 		ImGui::CreateContext();
 		ImGuiIO& io = ImGui::GetIO();
 		io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+		io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;
 
-		ImGuiStyle& st = ImGui::GetStyle();
-		st.WindowRounding = imguiWindowRounding;
+		// Setup Dear ImGui style
+		ImGuiStyle& style = ImGui::GetStyle();
+		style.WindowRounding = imguiWindowRounding;
 
+		float scale = SDL_GetWindowDisplayScale(window);
+		if (scale > 1.0f)
+		{
+			style.ScaleAllSizes(scale);
+			style.FontScaleDpi = scale;
+		}
+
+		// Setup renderer backend
 		if (!ImGui_ImplOpenGL3_Init(glslVersion.data()))
 		{
-			mod::Log(category, "ERROR - ImGui_ImplOpenGL3_Init failed for version \"{}\"", glslVersion);
+			mod::Log(category, "ERROR - ImGui_ImplOpenGL3_Init failed for glsl version \"{}\"", glslVersion);
 			return glContext;
 		}
 
@@ -235,11 +245,6 @@ namespace
 			++frame;
 			ImGui_ImplOpenGL3_NewFrame();
 			FeedInput(); /* update io.DisplaySize + queue input BEFORE NewFrame */
-			if (!glInfoLogged)
-			{
-				glInfoLogged = true;
-				mod::Log(category, "window={} display={}x{}", (void*) window, (int) ImGui::GetIO().DisplaySize.x, (int) ImGui::GetIO().DisplaySize.y);
-			}
 			ImGui::NewFrame();
 			if (showUi) DrawUi();
 			ImGui::Render();
