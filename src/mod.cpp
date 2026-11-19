@@ -135,7 +135,4 @@ void mod::Main()
 	// Install game hooks
 	hooks::game::InstallGetWorldDataHook();
 	hooks::game::InstallGetLevelHook();
-
-	// Run the overlay loop
-	overlay::PollInputLoop();
 }
