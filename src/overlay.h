@@ -5,5 +5,5 @@
 namespace overlay
 {
 	bool Init();
-	void Loop();
+	void PollInputLoop();
 }

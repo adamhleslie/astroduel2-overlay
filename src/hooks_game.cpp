@@ -265,7 +265,7 @@ static bool PoolRandPick(level_pool::RandMode randMode, const level_pool::World&
    so assign() may realloc safely). */
 static void GetLevelRemap(void* out, int worldType, int num, int pick, int mode)
 {
-	if (!level_pool::isInitialized.load() || !out) return;
+	if (!level_pool::IsInitialized() || !out) return;
 	if (pick == 3) return; /* cash grab */
 
 	if (auto worldOpt = level_pool::GetWorldByType(worldType))
@@ -278,7 +278,7 @@ static void GetLevelRemap(void* out, int worldType, int num, int pick, int mode)
 		if (pick != 2 && mode != 1)
 		{
 			std::string rpath;
-			level_pool::RandMode randMode = level_pool::randMode.load();
+			level_pool::RandMode randMode = level_pool::GetRandMode();
 			if (PoolRandPick(randMode, world, &rpath))
 			{
 				reinterpret_cast<std::string*>(out)->assign(rpath);

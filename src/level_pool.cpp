@@ -14,20 +14,14 @@
 
 #include "extensions_enchantum.h"
 
-std::atomic_bool level_pool::isInitialized{false};
-/* Random-map selection (render thread writes on combo change; game thread
- * reads in PoolRandPick -- same minor-race pattern as the active flags).
- * 0=Off, 1=WorldActive, 2=World, 3=AnyActive, 4=Any. Only ever reaches
- * PH/TA walk loads: deathmatch (pick=2), cash grab (pick=3) and the
- * deathmatch UI preview (mode=1) are all excluded in GetLevelRemap. */
-std::atomic<level_pool::RandMode> level_pool::randMode{RandMode::Off};
-
 namespace
 {
 	constexpr std::string_view category = "level-pool";
 	std::vector<level_pool::World> worlds;
 	enchantum::array<ad2::WorldType, size_t> worldIndexByType; // index into worlds, (size_t)-1 is invalid
 	size_t selectedWorldIndex = 0;
+	bool isInitialized = false;
+	level_pool::RandMode randMode = level_pool::RandMode::Off;
 
 	bool EqualsCaseInsensitive(const std::string& a, const std::string& b)
 	{
@@ -238,9 +232,7 @@ int level_pool::World::GetActiveLevelCount() const
 	return n;
 }
 
-/* the count the game actually sees: a single-map world is faked to 2,
-   because the walk's exhaust path is an assert (K must be >= 2). Both
-   nums (1 and 2) resolve to the lone active file in GetLevelRemap. */
+// the count the game actually sees: a single-map world is faked to 2, handled in GetLevelRemap
 int level_pool::World::GetLevelCountForGame() const
 {
 	int activeLevelCount = GetActiveLevelCount();
@@ -252,7 +244,7 @@ int level_pool::World::GetLevelCountForGame() const
 void level_pool::DrawUi()
 {
 	ImGui::Text("VERSUS LEVEL POOL");
-	if (!isInitialized.load() || worlds.empty())
+	if (!isInitialized || worlds.empty())
 	{
 		ImGui::TextDisabled("no worlds cached (res/levels/versus missing?)");
 	}
@@ -284,11 +276,11 @@ void level_pool::DrawUi()
 		ImGui::Spacing();
 
 		// Custom randomized map selection (Pilot Hunters / Team Annihilation only)
-		int randModeSelection = static_cast<std::underlying_type_t<RandMode>>(randMode.load());
+		int randModeSelection = static_cast<std::underlying_type_t<RandMode>>(randMode);
 		auto& names = ext::enchantum::names_c_str<RandMode>;
 		if (ImGui::Combo("Random map (PH/TA only)", &randModeSelection, names.data(), names.size()))
 		{
-			randMode.store(ext::enchantum::cast_or(randModeSelection, RandMode::Off));
+			randMode = ext::enchantum::cast_or(randModeSelection, RandMode::Off);
 		}
 		if ((randModeSelection == 1) && (selectedWorld.GetActiveLevelCount() == 0))
 		{
@@ -353,15 +345,17 @@ void level_pool::DrawUi()
 
 void level_pool::Init()
 {
-	assert(!isInitialized.load());
+	assert(!isInitialized);
 
 	// Default initialize worldIndexByType to invalid value (size_t)-1
 	worldIndexByType.fill(static_cast<size_t>(-1));
 
 	PoolInit();
-
-	isInitialized.store(true);
+	isInitialized = true;
 }
+
+bool level_pool::IsInitialized() { return isInitialized; }
+level_pool::RandMode level_pool::GetRandMode() { return randMode; }
 
 std::optional<std::reference_wrapper<const level_pool::World>> level_pool::GetWorldByType(ad2::WorldType type)
 {

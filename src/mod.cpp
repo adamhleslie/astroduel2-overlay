@@ -137,5 +137,5 @@ void mod::Main()
 	hooks::game::InstallGetLevelHook();
 
 	// Run the overlay loop
-	overlay::Loop();
+	overlay::PollInputLoop();
 }

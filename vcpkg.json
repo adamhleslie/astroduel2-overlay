@@ -6,7 +6,8 @@
     {
       "name": "imgui",
       "features": [
-        "opengl3-binding"
+        "opengl3-binding",
+        "sdl3-binding"
       ]
     },
     "minhook",

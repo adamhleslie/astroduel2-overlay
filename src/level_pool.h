@@ -1,6 +1,5 @@
 #pragma once
 
-#include <atomic>
 #include <optional>
 #include <string>
 #include <vector>
@@ -52,10 +51,9 @@ namespace level_pool
 	void Init();
 	void DrawUi();
 
+	bool IsInitialized();
+	RandMode GetRandMode();
+
 	std::optional<std::reference_wrapper<const World>> GetWorldByType(ad2::WorldType type);
 	std::optional<std::reference_wrapper<const World>> GetWorldByType(std::underlying_type_t<ad2::WorldType> underlyingType);
-
-	// Atomics used by game thread and DLL thread
-	extern std::atomic_bool isInitialized;
-	extern std::atomic<RandMode> randMode;
 }
