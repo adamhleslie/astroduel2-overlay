@@ -1,8 +1,8 @@
 #include "hooks_game.h"
 
+#include <windows.h>
 #include <cstdio>
 #include <MinHook.h>
-#include <winnt.h>
 #include <string>
 #include <vector>
 #include <enchantum/std_format.hpp>

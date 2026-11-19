@@ -246,7 +246,7 @@ void level_pool::DrawUi()
 	ImGui::Text("VERSUS LEVEL POOL");
 	if (!isInitialized || worlds.empty())
 	{
-		ImGui::TextDisabled("no worlds cached (res/levels/versus missing?)");
+		ImGui::TextDisabled("no worlds loaded");
 	}
 	else
 	{
@@ -278,7 +278,7 @@ void level_pool::DrawUi()
 		// Custom randomized map selection (Pilot Hunters / Team Annihilation only)
 		int randModeSelection = static_cast<std::underlying_type_t<RandMode>>(randMode);
 		auto& names = ext::enchantum::names_c_str<RandMode>;
-		if (ImGui::Combo("Random map (PH/TA only)", &randModeSelection, names.data(), names.size()))
+		if (ImGui::Combo("Random map (PH/TA only)", &randModeSelection, names.data(), static_cast<int>(names.size())))
 		{
 			randMode = ext::enchantum::cast_or(randModeSelection, RandMode::Off);
 		}
@@ -292,7 +292,7 @@ void level_pool::DrawUi()
 		{
 			for (const auto [i, world] : worlds | std::ranges::views::enumerate)
 			{
-				if (ImGui::Selectable(world.name.c_str(), selectedWorldIndex == i))
+				if (ImGui::Selectable(world.name.c_str(), selectedWorldIndex == static_cast<size_t>(i)))
 				{
 					selectedWorldIndex = i;
 				}
@@ -319,7 +319,7 @@ void level_pool::DrawUi()
 		std::string context;
 		if (activeCount == 0)
 		{
-			context = "(0 maps -- crash expected, below walk minimum)";
+			context = "(0 maps - crash expected)";
 		}
 		else if (activeCount == 1)
 		{

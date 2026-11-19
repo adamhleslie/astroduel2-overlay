@@ -7,7 +7,7 @@
 #include <SDL3/SDL_version.h>
 
 #include "mod.h"
-#include "hooks_iat.h"
+#include "ad2_iat.h"
 #include "level_pool.h"
 
 namespace
@@ -170,10 +170,10 @@ bool overlay::Init()
 	keyboardState = SDL_GetKeyboardState(nullptr);
 
 	// Hook SDL iat
-	if (!hooks::iat::HookIatForModule("SDL3.dll", NAME_OF(SDL_GL_CreateContext), SDL_GL_CreateContextHook, sdl_gl_createContextOrig) ||
-		!hooks::iat::HookIatForModule("SDL3.dll", NAME_OF(SDL_GL_DestroyContext), SDL_GL_DestroyContextHook, sdl_gl_destroyContextOrig) ||
-		!hooks::iat::HookIatForModule("SDL3.dll", NAME_OF(SDL_PollEvent), SDL_PollEventHook, sdl_pollEventOrig) ||
-		!hooks::iat::HookIatForModule("SDL3.dll", NAME_OF(SDL_GL_SwapWindow), SDL_GL_SwapWindowHook, sdl_gl_swapWindowOrig))
+	if (!ad2::iat::HookIatForModule("SDL3.dll", NAME_OF(SDL_GL_CreateContext), SDL_GL_CreateContextHook, sdl_gl_createContextOrig) ||
+		!ad2::iat::HookIatForModule("SDL3.dll", NAME_OF(SDL_GL_DestroyContext), SDL_GL_DestroyContextHook, sdl_gl_destroyContextOrig) ||
+		!ad2::iat::HookIatForModule("SDL3.dll", NAME_OF(SDL_PollEvent), SDL_PollEventHook, sdl_pollEventOrig) ||
+		!ad2::iat::HookIatForModule("SDL3.dll", NAME_OF(SDL_GL_SwapWindow), SDL_GL_SwapWindowHook, sdl_gl_swapWindowOrig))
 	{
 		return false;
 	}

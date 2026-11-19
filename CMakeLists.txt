@@ -24,7 +24,8 @@ add_library(steam_api64 SHARED
     src/hooks_iat.cpp
     src/hooks_game.cpp
     src/level_pool.cpp
-    src/overlay.cpp)
+    src/overlay.cpp
+    src/ad2_iat.cpp)
 
 set_property(TARGET steam_api64 PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL") # MSVC DLL
 target_compile_options(steam_api64 PRIVATE /W4 /utf-8)
