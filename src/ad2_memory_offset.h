@@ -3,6 +3,7 @@
 #include "ad2.h"
 
 #include <format>
+#include <cassert>
 
 namespace ad2
 {
@@ -25,7 +26,7 @@ namespace ad2
 #pragma endregion
 
 	// Identifies a memory offset within the ad2 module
-	// Note: Backed by unsigned type, will underflow if the memory offset calculation goes below
+	// Note: Backed by unsigned type, asserts if underflow in an arithmetic operation goes below
 	// the base memory address for the module
 	struct MemoryOffset
 	{
@@ -37,9 +38,17 @@ namespace ad2
 		template<typename T = void>
 		T* ToAddress() const { return GetAddress<T>(ad2Module, offset); }
 
-		// Arithmetic operators
-		constexpr MemoryOffset operator+(std::ptrdiff_t delta) const { return MemoryOffset{offset + delta}; }
-		constexpr MemoryOffset operator-(std::ptrdiff_t delta) const { return MemoryOffset{offset - delta}; }
+		// Arithmetic operators - assert on arithmetic that produces a negative value
+		constexpr MemoryOffset operator+(std::ptrdiff_t delta) const
+		{
+			assert(offset >= -delta);
+			return MemoryOffset{offset + delta};
+		}
+		constexpr MemoryOffset operator-(std::ptrdiff_t delta) const
+		{
+			assert(offset >= delta);
+			return MemoryOffset{offset - delta};
+		}
 		constexpr MemoryOffset& operator++() { return *this += 1; }
 		constexpr MemoryOffset& operator--() { return *this -= 1; }
 		constexpr MemoryOffset operator++(int)
@@ -50,17 +59,20 @@ namespace ad2
 		}
 		constexpr MemoryOffset operator--(int)
 		{
+			assert(offset > 0);
 			const MemoryOffset initial = *this;
 			offset -= 1;
 			return initial;
 		}
 		constexpr MemoryOffset& operator+=(std::ptrdiff_t delta)
 		{
+			assert(offset >= -delta);
 			offset += delta;
 			return *this;
 		}
 		constexpr MemoryOffset& operator-=(std::ptrdiff_t delta)
 		{
+			assert(offset >= delta);
 			offset -= delta;
 			return *this;
 		}

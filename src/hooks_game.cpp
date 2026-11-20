@@ -8,6 +8,7 @@
 #include <enchantum/std_format.hpp>
 
 #include "ad2_addresses.h"
+#include "ad2_functions.h"
 #include "extensions_enchantum.h"
 #include "mod.h"
 #include "level_pool.h"
@@ -47,7 +48,7 @@ static void* getWorldDataOrig = nullptr; /* MinHook trampoline = original functi
 static volatile LONG getWorldDataState = 0; /* 0=off/failed, 1=installed+enabled */
 // static int getWorldDataRevertLogged = 0;
 /* getLevel state -- declared here; the hook is further below. */
-static void* getLevelOrig = nullptr;
+static decltype(&ad2::functions::GetLevel) getLevelOrig = nullptr;
 static volatile LONG getLevelState = 0;
 // static int getLevelRevertLogged = 0;
 
@@ -144,7 +145,6 @@ bool hooks::game::InstallGetWorldDataHook()
 /* singleton DAT_1405de9c8 + 0x45c) and cnt (DAT_1405de56c = the d3   */
 /* level count). Zero behavioral change.                              */
 /* ------------------------------------------------------------------ */
-typedef void* (*FnGetLevel)(void* out, int world, int num, char mode);
 
 /* Game's 32-byte std::string layout (proven from the copy-ctor FUN_140008700
    and dtor FUN_140003000, not guessed):
@@ -325,12 +325,9 @@ static void GetLevelRemap(void* out, int worldType, int num, int pick, int mode)
 
 static void* GetLevelHook(void* out, int worldType, int num, char mode)
 {
-	void* ret = getLevelOrig ? ((FnGetLevel) getLevelOrig)(out, worldType, num, mode) : nullptr;
-	if (!getLevelOrig)
-	{
-		mod::Log(levelCategory, "FATAL - no trampoline; composer NOT run");
-		return ret;
-	}
+	assert(getLevelOrig);
+	void* ret = getLevelOrig(out, worldType, num, mode);
+
 	/* probe: pick context FUN_14026B9C0 refreshes before the chain. */
 	uintptr_t b = reinterpret_cast<uintptr_t>(ad2::ad2Module);
 	int pick = *(volatile int32_t*) (b + 0x5B9FF0); /* DAT_1405b9ff0 */
@@ -354,8 +351,10 @@ static void* GetLevelHook(void* out, int worldType, int num, char mode)
 
 bool hooks::game::InstallGetLevelHook()
 {
-	void* target = ad2::addresses::getLevel.ToAddress();
-	if (MH_CreateHook(target, reinterpret_cast<void*>(GetLevelHook), &getLevelOrig) != MH_OK)
+	LPVOID target = ad2::addresses::getLevel.ToAddress();
+	LPVOID detour = reinterpret_cast<LPVOID>(GetLevelHook);
+	LPVOID* original = reinterpret_cast<LPVOID*>(&getLevelOrig);
+	if (MH_CreateHook(target, detour, original) != MH_OK)
 	{
 		mod::Log(levelCategory, "MH_CreateHook FAILED -- REFUSED, stock behavior");
 		return false;
@@ -367,6 +366,6 @@ bool hooks::game::InstallGetLevelHook()
 		return false;
 	}
 	getLevelState = 1;
-	mod::Log(levelCategory, "INSTALLED target={} trampoline={}", target, getLevelOrig);
+	mod::Log(levelCategory, "INSTALLED target={} trampoline={}", target, *original);
 	return true;
 }
