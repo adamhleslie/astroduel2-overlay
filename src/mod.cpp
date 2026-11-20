@@ -133,6 +133,5 @@ void mod::Main()
 	hooks::iat::InstallHooks();
 
 	// Install game hooks
-	hooks::game::InstallGetWorldDataHook();
-	hooks::game::InstallGetLevelHook();
+	hooks::game::InstallHooks();
 }

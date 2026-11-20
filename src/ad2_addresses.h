@@ -4,8 +4,8 @@
 
 namespace ad2::addresses
 {
-	constexpr MemoryOffset getWorldData{0x2AE190};
-	constexpr MemoryOffset getLevel{0x26C1C0};
+	constexpr MemoryOffset getWorldData{0x2AE190}; // ad2::functions::GetWorldData
+	constexpr MemoryOffset getLevel{0x26C1C0}; // ad2::functions::GetLevel
 
 	constexpr MemoryOffset iatRegionStart{0x47e000};
 	constexpr MemoryOffset iatRegionEnd{0x495a00};

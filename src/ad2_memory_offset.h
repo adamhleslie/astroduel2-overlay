@@ -41,12 +41,12 @@ namespace ad2
 		// Arithmetic operators - assert on arithmetic that produces a negative value
 		constexpr MemoryOffset operator+(std::ptrdiff_t delta) const
 		{
-			assert(offset >= -delta);
+			assert((delta >= 0) || (offset >= static_cast<uintptr_t>(-delta)));
 			return MemoryOffset{offset + delta};
 		}
 		constexpr MemoryOffset operator-(std::ptrdiff_t delta) const
 		{
-			assert(offset >= delta);
+			assert((delta <= 0) || (offset >= static_cast<uintptr_t>(delta)));
 			return MemoryOffset{offset - delta};
 		}
 		constexpr MemoryOffset& operator++() { return *this += 1; }
@@ -66,13 +66,13 @@ namespace ad2
 		}
 		constexpr MemoryOffset& operator+=(std::ptrdiff_t delta)
 		{
-			assert(offset >= -delta);
+			assert((delta >= 0) || (offset >= static_cast<uintptr_t>(-delta)));
 			offset += delta;
 			return *this;
 		}
 		constexpr MemoryOffset& operator-=(std::ptrdiff_t delta)
 		{
-			assert(offset >= delta);
+			assert((delta <= 0) || (offset >= static_cast<uintptr_t>(delta)));
 			offset -= delta;
 			return *this;
 		}

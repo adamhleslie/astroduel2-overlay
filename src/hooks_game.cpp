@@ -15,6 +15,7 @@
 
 namespace
 {
+	constexpr std::string_view category = "game";
 	constexpr std::string_view worldDataCategory = "get-world-data";
 	constexpr std::string_view levelCategory = "get-level";
 
@@ -44,7 +45,7 @@ namespace
 /* silently disengages (stock behavior, no crash) -- the verifier     */
 /* logs it.                                                          */
 /* ------------------------------------------------------------------ */
-static void* getWorldDataOrig = nullptr; /* MinHook trampoline = original function */
+static decltype(&ad2::functions::GetWorldData) getWorldDataOrig = nullptr;
 static volatile LONG getWorldDataState = 0; /* 0=off/failed, 1=installed+enabled */
 // static int getWorldDataRevertLogged = 0;
 /* getLevel state -- declared here; the hook is further below. */
@@ -64,12 +65,8 @@ typedef void* (*FnGetWorldData)(void* out, int worldType);
    needed -- ra0 already names the call site.) */
 static void* GetWorldDataHook(void* out, int worldType)
 {
-	if (!getWorldDataOrig)
-	{
-		mod::Log(worldDataCategory, "FATAL -- no trampoline; out buffer left zeroed");
-		return out;
-	}
-	void* r = ((FnGetWorldData) getWorldDataOrig)(out, worldType);
+	assert(getWorldDataOrig);
+	void* r = getWorldDataOrig(out, worldType);
 	int* f = (int*) r; /* f[0..3] = d0,d1,d2,d3 */
 	const int stock = f[3];
 	ad2::WorldType type = ext::enchantum::cast_or(worldType, ad2::WorldType::Invalid);
@@ -82,30 +79,24 @@ static void* GetWorldDataHook(void* out, int worldType)
 	return r;
 }
 
-bool hooks::game::InstallGetWorldDataHook()
+static bool InstallGetWorldDataHook()
 {
-	if (MH_Initialize() != MH_OK)
+	LPVOID target = ad2::addresses::getWorldData.ToAddress();
+	LPVOID detour = reinterpret_cast<LPVOID>(GetWorldDataHook);
+	LPVOID* original = reinterpret_cast<LPVOID*>(&getWorldDataOrig);
+	if (MH_CreateHook(target, detour, original) != MH_OK)
 	{
-		mod::Log(worldDataCategory, "MH_Initialize FAILED");
+		mod::Log(category, "MH_CreateHook FAILED -- REFUSED, stock behavior");
 		return false;
 	}
-	void* target = ad2::addresses::getWorldData.ToAddress();
-	if (MH_CreateHook(target, reinterpret_cast<void*>(GetWorldDataHook), &getWorldDataOrig) != MH_OK)
-	{
-		mod::Log(worldDataCategory, "MH_CreateHook FAILED -- REFUSED, stock behavior");
-		return false;
-	}
-	/* EnableHookLL freezes all threads once while it writes the entry; do
-	   it after the IAT hooks (render path stable) and well before the
-	   ~t+9s preload block that first fires worldDataForType. */
 	if (MH_EnableHook(target) != MH_OK)
 	{
-		mod::Log(worldDataCategory, "MH_EnableHook FAILED -- MH_RemoveHook, stock behavior");
+		mod::Log(category, "MH_EnableHook FAILED -- MH_RemoveHook, stock behavior");
 		MH_RemoveHook(target);
 		return false;
 	}
 	getWorldDataState = 1;
-	mod::Log(worldDataCategory, "INSTALLED target={} trampoline={}", target, getWorldDataOrig);
+	mod::Log(category, "INSTALLED target={} trampoline={}", target, *original);
 	return true;
 }
 
@@ -349,23 +340,34 @@ static void* GetLevelHook(void* out, int worldType, int num, char mode)
 	return ret;
 }
 
-bool hooks::game::InstallGetLevelHook()
+static bool InstallGetLevelHook()
 {
 	LPVOID target = ad2::addresses::getLevel.ToAddress();
 	LPVOID detour = reinterpret_cast<LPVOID>(GetLevelHook);
 	LPVOID* original = reinterpret_cast<LPVOID*>(&getLevelOrig);
 	if (MH_CreateHook(target, detour, original) != MH_OK)
 	{
-		mod::Log(levelCategory, "MH_CreateHook FAILED -- REFUSED, stock behavior");
+		mod::Log(category, "MH_CreateHook FAILED -- REFUSED, stock behavior");
 		return false;
 	}
 	if (MH_EnableHook(target) != MH_OK)
 	{
-		mod::Log(levelCategory, "MH_EnableHook FAILED -- MH_RemoveHook, stock behavior");
+		mod::Log(category, "MH_EnableHook FAILED -- MH_RemoveHook, stock behavior");
 		MH_RemoveHook(target);
 		return false;
 	}
 	getLevelState = 1;
-	mod::Log(levelCategory, "INSTALLED target={} trampoline={}", target, *original);
+	mod::Log(category, "INSTALLED target={} trampoline={}", target, *original);
 	return true;
+}
+
+bool hooks::game::InstallHooks()
+{
+	if (MH_Initialize() != MH_OK)
+	{
+		mod::Log(category, "MH_Initialize FAILED");
+		return false;
+	}
+
+	return InstallGetWorldDataHook() && InstallGetLevelHook();
 }

@@ -4,6 +4,5 @@
 // TODO: Cleanup
 namespace hooks::game
 {
-	bool InstallGetWorldDataHook();
-	bool InstallGetLevelHook();
+	bool InstallHooks();
 }
