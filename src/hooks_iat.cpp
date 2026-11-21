@@ -69,9 +69,9 @@ namespace
 	}
 }
 
-void hooks::iat::InstallHooks()
+bool hooks::iat::InstallHooks()
 {
-	ad2::iat::HookIatForKernel(NAME_OF(CreateFileW), CreateFileWHook, createFileWOrig);
-	ad2::iat::HookIatForKernel(NAME_OF(GetFileAttributesW), GetFileAttributesWHook, getFileAttributesWOrig);
-	ad2::iat::HookIatForModule("shell32.dll", NAME_OF(SHGetKnownFolderPath), SHGetKnownFolderPathHook, shGetKnownFolderOrig);
+	return ad2::iat::HookIatForKernel(NAME_OF(CreateFileW), CreateFileWHook, createFileWOrig) &&
+		ad2::iat::HookIatForKernel(NAME_OF(GetFileAttributesW), GetFileAttributesWHook, getFileAttributesWOrig) &&
+		ad2::iat::HookIatForModule("shell32.dll", NAME_OF(SHGetKnownFolderPath), SHGetKnownFolderPathHook, shGetKnownFolderOrig);
 }

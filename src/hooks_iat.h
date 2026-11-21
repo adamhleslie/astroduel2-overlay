@@ -3,5 +3,5 @@
 // Import Address Table (IAT) Hooks
 namespace hooks::iat
 {
-	void InstallHooks();
+	bool InstallHooks();
 }

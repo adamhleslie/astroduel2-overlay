@@ -79,27 +79,6 @@ static void* GetWorldDataHook(void* out, int worldType)
 	return r;
 }
 
-static bool InstallGetWorldDataHook()
-{
-	LPVOID target = ad2::addresses::getWorldData.ToAddress();
-	LPVOID detour = reinterpret_cast<LPVOID>(GetWorldDataHook);
-	LPVOID* original = reinterpret_cast<LPVOID*>(&getWorldDataOrig);
-	if (MH_CreateHook(target, detour, original) != MH_OK)
-	{
-		mod::Log(category, "MH_CreateHook FAILED -- REFUSED, stock behavior");
-		return false;
-	}
-	if (MH_EnableHook(target) != MH_OK)
-	{
-		mod::Log(category, "MH_EnableHook FAILED -- MH_RemoveHook, stock behavior");
-		MH_RemoveHook(target);
-		return false;
-	}
-	getWorldDataState = 1;
-	mod::Log(category, "INSTALLED target={} trampoline={}", target, *original);
-	return true;
-}
-
 /* ~5s worker-loop check (both MinHook entries): the entry must still be
    our E9 rel32. If VMP re-writes it the hook has silently disengaged
    (stock behavior). log only, no re-arm. */
@@ -340,34 +319,36 @@ static void* GetLevelHook(void* out, int worldType, int num, char mode)
 	return ret;
 }
 
-static bool InstallGetLevelHook()
+template <typename T>
+bool HookGameFunction(const ad2::MemoryOffset& target, T hook, T& original, const std::string& name)
 {
-	LPVOID target = ad2::addresses::getLevel.ToAddress();
-	LPVOID detour = reinterpret_cast<LPVOID>(GetLevelHook);
-	LPVOID* original = reinterpret_cast<LPVOID*>(&getLevelOrig);
-	if (MH_CreateHook(target, detour, original) != MH_OK)
+	LPVOID targetAddress = target.ToAddress();
+	LPVOID hookAddress = reinterpret_cast<LPVOID>(hook);
+	LPVOID* originalAddress = reinterpret_cast<LPVOID*>(&original);
+	if (MH_CreateHook(targetAddress, hookAddress, originalAddress) != MH_OK)
 	{
-		mod::Log(category, "MH_CreateHook FAILED -- REFUSED, stock behavior");
+		mod::Log(category, "{} - MH_CreateHook failed at {}", name, target);
 		return false;
 	}
-	if (MH_EnableHook(target) != MH_OK)
+	if (MH_EnableHook(targetAddress) != MH_OK)
 	{
-		mod::Log(category, "MH_EnableHook FAILED -- MH_RemoveHook, stock behavior");
-		MH_RemoveHook(target);
+		mod::Log(category, "{} - MH_EnableHook failed at {}", name, target);
+		MH_RemoveHook(targetAddress);
 		return false;
 	}
-	getLevelState = 1;
-	mod::Log(category, "INSTALLED target={} trampoline={}", target, *original);
+	mod::Log(category, "{} - Hook installed at {}", name, target);
 	return true;
 }
 
 bool hooks::game::InstallHooks()
 {
+	// TODO: Call MH_Uninitialize
 	if (MH_Initialize() != MH_OK)
 	{
 		mod::Log(category, "MH_Initialize FAILED");
 		return false;
 	}
 
-	return InstallGetWorldDataHook() && InstallGetLevelHook();
+	return HookGameFunction(ad2::addresses::getLevel, GetLevelHook, getLevelOrig, NAME_OF(ad2::functions::GetLevel)) &&
+		HookGameFunction(ad2::addresses::getWorldData, GetWorldDataHook, getWorldDataOrig, NAME_OF(ad2::functions::GetWorldData()));
 }
