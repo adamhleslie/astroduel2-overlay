@@ -19,7 +19,7 @@
     }
   ],
   "buildPresets": [
-    { "name": "Debug",   "configurePreset": "windows", "configuration": "Debug" },
+    { "name": "RelWithDebInfo", "configurePreset": "windows", "configuration": "RelWithDebInfo" },
     { "name": "Release", "configurePreset": "windows", "configuration": "Release" }
   ]
 }

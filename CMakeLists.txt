@@ -27,6 +27,18 @@ add_library(steam_api64 SHARED
     src/overlay.cpp
     src/ad2_iat.cpp)
 
+# Deploy + launch based on GAME_DIR being set to the AstroDuel2 directory
+if (GAME_DIR)
+    add_custom_target(deploy
+        DEPENDS steam_api64
+        COMMAND pwsh -NoProfile -File "${CMAKE_CURRENT_SOURCE_DIR}/tools/CopyAndRun.ps1" "${GAME_DIR}" -Configuration $<CONFIG> -NoRun
+        WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+        USES_TERMINAL
+        COMMENT "Deploying steam_api64.dll (+ .pdb) to the game directory")
+else ()
+    message(WARNING "GAME_DIR is not set - the 'deploy' target is disabled.")
+endif ()
+
 set_property(TARGET steam_api64 PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL") # MSVC DLL
 target_compile_options(steam_api64 PRIVATE /W4 /utf-8)
 target_compile_definitions(steam_api64 PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN) # Windows header include options

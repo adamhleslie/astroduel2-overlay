@@ -3,7 +3,7 @@
     Sets up the AstroDuel2 Overlay mod, and runs the game.
 
 .DESCRIPTION
-    .\script.ps1 "<Astro Duel 2 Directory>" [-Configuration <Debug|Release>] [-NoRun]
+    .\script.ps1 "<Astro Duel 2 Directory>" [-Configuration <RelWithDebInfo|Release>] [-NoRun]
 #>
 
 # TODO: Add a hash test of the .exe and .dll to ensure no updates have occurred
@@ -12,8 +12,8 @@ param(
     [string]$TargetPath, # required: the Astro Duel 2 directory
 
     [Parameter(Position = 1)]
-    [ValidateSet('Debug', 'Release')]
-    [string]$Configuration = 'Release', # build configuration of the replacement DLL
+    [ValidateSet('RelWithDebInfo', 'Release')]
+    [string]$Configuration = 'RelWithDebInfo', # build configuration of the replacement DLL
 
     [switch]$NoRun
 )
@@ -21,7 +21,9 @@ param(
 # Options:
 $SteamDLL       = "steam_api64.dll"
 $SteamDLLRename = "steam_api64_real.dll"
+$SteamPDB       = "steam_api64.pdb"
 $CopySource     = "build\$Configuration\$SteamDLL"
+$CopySourcePDB  = "build\$Configuration\$SteamPDB"
 $Executable     = "AstroDuel2.exe"
 
 # Validate path
@@ -57,6 +59,15 @@ if (-not (Test-Path -LiteralPath $CopySource -PathType Leaf)) {
 $copyDest = Join-Path $TargetPath $SteamDLL
 Copy-Item -LiteralPath $CopySource -Destination $copyDest -Force
 Write-Host "Copied '$CopySource' -> '$copyDest'."
+
+# Copy the PDB
+if (Test-Path -LiteralPath $CopySourcePDB -PathType Leaf) {
+    $pdbDest = Join-Path $TargetPath $SteamPDB
+    Copy-Item -LiteralPath $CopySourcePDB -Destination $pdbDest -Force
+    Write-Host "Copied '$CopySourcePDB' -> '$pdbDest'."
+} else {
+    Write-Host "PDB not found - skipped: $CopySourcePDB"
+}
 
 if (-not $NoRun) {
     # Run game
