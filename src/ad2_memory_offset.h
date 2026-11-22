@@ -38,6 +38,9 @@ namespace ad2
 		template<typename T = void>
 		T* ToAddress() const { return GetAddress<T>(ad2Module, offset); }
 
+		template<typename T>
+		T& ToReference() const { return *GetAddress<T>(ad2Module, offset); }
+
 		// Arithmetic operators - assert on arithmetic that produces a negative value
 		constexpr MemoryOffset operator+(std::ptrdiff_t delta) const
 		{
@@ -82,6 +85,14 @@ namespace ad2
 		friend constexpr auto operator<=>(MemoryOffset a, MemoryOffset b) { return a.offset <=> b.offset; }
 
 		uintptr_t offset;
+	};
+
+	template<typename T>
+	struct TypedMemoryOffset : MemoryOffset
+	{
+		using MemoryOffset::MemoryOffset;
+
+		T& operator*() const { return ToReference<T>(); }
 	};
 }
 

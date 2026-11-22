@@ -7,10 +7,12 @@ namespace ad2::addresses
 	constexpr MemoryOffset getWorldData{0x2AE190}; // ad2::functions::GetWorldData
 	constexpr MemoryOffset getLevel{0x26C1C0}; // ad2::functions::GetLevel
 
+	constexpr TypedMemoryOffset<int> versusMode{0x5B9FF0};
+
 	constexpr MemoryOffset iatRegionStart{0x47e000};
 	constexpr MemoryOffset iatRegionEnd{0x495a00};
 
-	// 20-byte prologue, readable post-VMP unpack
+	// 20-byte prologue, accurate post-VMP unpack
 	constexpr MemoryOffset unpackPrologue{0x26cce0};
 	constexpr std::array<uint8_t, 20> unpackedPrologue =
 	{
