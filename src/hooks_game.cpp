@@ -8,7 +8,6 @@
 #include <enchantum/std_format.hpp>
 
 #include "ad2_addresses.h"
-#include "ad2_functions.h"
 #include "extensions_enchantum.h"
 #include "mod.h"
 #include "level_pool.h"
@@ -18,6 +17,9 @@ namespace
 	constexpr std::string_view category = "game";
 	constexpr std::string_view worldDataCategory = "get-world-data";
 	constexpr std::string_view levelCategory = "get-level";
+
+	decltype(ad2::addresses::getWorldData)::Type* getWorldDataOrig = nullptr;
+	decltype(ad2::addresses::getLevelPath)::Type* getLevelPathOrig = nullptr;
 
 	// _ReturnAddress() replacement
 	void* GetCallerReturnAddress()
@@ -45,15 +47,6 @@ namespace
 /* silently disengages (stock behavior, no crash) -- the verifier     */
 /* logs it.                                                          */
 /* ------------------------------------------------------------------ */
-static decltype(&ad2::functions::GetWorldData) getWorldDataOrig = nullptr;
-static volatile LONG getWorldDataState = 0; /* 0=off/failed, 1=installed+enabled */
-// static int getWorldDataRevertLogged = 0;
-/* getLevel state -- declared here; the hook is further below. */
-static decltype(&ad2::functions::GetLevel) getLevelOrig = nullptr;
-static volatile LONG getLevelState = 0;
-// static int getLevelRevertLogged = 0;
-
-typedef void* (*FnGetWorldData)(void* out, int worldType);
 
 /* RA forensics: MinHook patches the target entry with an absolute JMP to
    the detour, so the game's CALL has already pushed the real return
@@ -79,25 +72,6 @@ static void* GetWorldDataHook(void* out, int worldType)
 	return r;
 }
 
-/* ~5s worker-loop check (both MinHook entries): the entry must still be
-   our E9 rel32. If VMP re-writes it the hook has silently disengaged
-   (stock behavior). log only, no re-arm. */
-// static void VerifyEntryHooks()
-// {
-//     if (InterlockedCompareExchange(&getWorldDataState, 0, 0) == 1) {
-//         uint8_t* p = (uint8_t*)(ad2mod::g_module_base + 0x2AE190);
-//         if (p[0] != 0xE9 && getWorldDataRevertLogged++ < 3)
-//             ad2mod::Log(worldDataCategory, "entry REVERTED (bytes %02x %02x %02x %02x) -- VMP? hook disengaged, stock behavior",
-//                 p[0], p[1], p[2], p[3]);
-//     }
-//     if (InterlockedCompareExchange(&getLevelState, 0, 0) == 1) {
-//         uint8_t* p = (uint8_t*)(ad2mod::g_module_base + 0x26C1C0);
-//         if (p[0] != 0xE9 && getLevelRevertLogged++ < 3)
-//             ad2mod::log("getLevel: entry REVERTED (bytes %02x %02x %02x %02x) -- VMP? hook disengaged, stock behavior",
-//                 p[0], p[1], p[2], p[3]);
-//     }
-// }
-
 /* ------------------------------------------------------------------ */
 /* MinHook: LOG-ONLY hook on the level-string composer getLevelString */
 /* (0x14026C1C0: rcx=out std::string, rdx=world, r8=level num,        */
@@ -115,34 +89,6 @@ static void* GetWorldDataHook(void* out, int worldType)
 /* singleton DAT_1405de9c8 + 0x45c) and cnt (DAT_1405de56c = the d3   */
 /* level count). Zero behavioral change.                              */
 /* ------------------------------------------------------------------ */
-
-/* Game's 32-byte std::string layout (proven from the copy-ctor FUN_140008700
-   and dtor FUN_140003000, not guessed):
-	 bytes  0-7  word0: heap data ptr (heap mode) or SSO chars[0..7]
-	 bytes  8-15 word1: SSO chars[8..15] (stale/garbage in heap mode)
-	 bytes 16-23 word2: length
-	 bytes 24-31 word3: capacity -- >15 => heap, ==15 => SSO (dtor frees word0 iff word3>15)
-   Read-only, clamped. */
-static void PeekStdString(void* s, char* buf, size_t bufsize)
-{
-	if (!s)
-	{
-		snprintf(buf, bufsize, "(nil)");
-		return;
-	}
-	const uint64_t* w = (const uint64_t*) s;
-	uint64_t len = w[2], cap = w[3];
-	char* data = (cap > 15) ? (char*) w[0] : (char*) s; /* SSO chars in bytes 0-15 */
-	if ((!data && cap > 15) || len > 127)
-	{
-		snprintf(buf, bufsize, "(bad ptr=%p len=%llu cap=%llu)", (void*) w[0], (unsigned long long) len,
-		         (unsigned long long) cap);
-		return;
-	}
-	size_t n = len < bufsize - 1 ? (size_t) len : bufsize - 1;
-	memcpy(buf, data, n);
-	buf[n] = 0;
-}
 
 /* Private PRNG (splitmix64) -- must NOT use srand/rand: the game imports
  * the CRT rand (IAT-verified) and its own randomization rides that single
@@ -165,7 +111,7 @@ static int RandBelow(int n)
  * otherwise fills *out with a uniformly random candidate's full relative
  * path ("levels/versus/<world>/<file>") -- the world in the path may differ
  * from the one being loaded (Any/AnyActive). */
-static bool PoolRandPick(level_pool::RandMode randMode, const level_pool::World& world, std::string* out)
+static bool PoolRandPick(level_pool::RandMode randMode, const level_pool::World& world, std::string& out)
 {
 	if (randMode == level_pool::RandMode::Off)
 	{
@@ -204,7 +150,7 @@ static bool PoolRandPick(level_pool::RandMode randMode, const level_pool::World&
 	if (!c.empty())
 	{
 		const auto& pick = c[RandBelow((int) c.size())];
-		*out = "levels/versus/" + *pick.first + "/" + *pick.second;
+		out = "levels/versus/" + *pick.first + "/" + *pick.second;
 		return true;
 	}
 
@@ -215,44 +161,45 @@ static bool PoolRandPick(level_pool::RandMode randMode, const level_pool::World&
    with num = pool slot (1..K, via the WdHook count). Rewrite the composed
    string to the slot's actual .tmx per the live cache.
    Guards, in order (each = silent no-op unless noted):
-	 pick == 3            cash grab -- composer ignores num (cg_<world>.tmx);
+	 versusMode == 3            cash grab -- composer ignores num (cg_<world>.tmx);
 						  the 4th param is 0 in BOTH branches (proven in the
 						  caller FUN_140013c00: it sets DAT_1405b9ff0 but passes
-						  0); pick is the real discriminator
+						  0); versusMode is the real discriminator
 	 world out of range   void/default/unknown are not pooled
 	 no slot == num       outside the active pool (count grew) -> ERROR log
 	 name == <w><num>.tmx identity -- the file IS its slot; no rewrite
-   Random-map mode (randMode != 0) redirects the load to a uniformly
+   Random-map cashGrab (randMode != 0) redirects the load to a uniformly
    random candidate's full path BEFORE the slot lookup -- PH/TA loads only:
-   deathmatch (pick == 2, player-specified) and the deathmatch UI preview
-   (mode == 1) keep the normal slot remap below; the 1/N identity pick is
+   deathmatch (versusMode == 2, player-specified) and the deathmatch UI preview
+   (cashGrab == 1) keep the normal slot remap below; the 1/N identity versusMode is
    negligible and rewrites anyway.
    Deathmatch loads DO get the normal slot remap: the picker is bounded by
    the WdHook count, so num is in [1..K] and the table must stay total over
    it (a player-specified level lands on a valid active map).
-   Rewrites via assign() on the game's 32-byte std::string (layout proven from
-   its own copy-ctor FUN_140008700 / dtor FUN_140003000; shared UCRT heap,
-   so assign() may realloc safely). */
-static void GetLevelRemap(void* out, int worldType, int num, int pick, int mode)
+   Rewrites via assign() on the game's 32-byte std::string: the overlay's
+   std::string is layout-identical (same MSVC 32-byte SSO-15: ptr/SSO@0x00,
+   len@0x10, cap@0x18, SSO sentinel 0xf, heap cap = len|0xf min 16 -- verified
+   against the game's own CtorCopy 0x140008700 / Dtor 0x140003000 and observed
+   live in the log: len=30, cap=31); shared UCRT process heap, so assign()
+   may realloc the slot's buffer safely. */
+static void ApplyLevelPoolRename(std::string& out, int worldType, int num, bool cashGrab)
 {
-	if (!level_pool::IsInitialized() || !out) return;
-	if (pick == 3) return; /* cash grab */
+	if (!level_pool::IsInitialized()) return;
+	if (*ad2::addresses::versusMode == 3) return; /* cash grab */
 
 	if (auto worldOpt = level_pool::GetWorldByType(worldType))
 	{
 		const level_pool::World& world = *worldOpt;
 
 		/* random map selection -- PH/TA loads only (deathmatch and its UI
-		preview take the normal slot remap below). Off mode or an empty
+		preview take the normal slot remap below). Off cashGrab or an empty
 		candidate pool: fall through. */
-		if (pick != 2 && mode != 1)
+		if (*ad2::addresses::versusMode != 2 && !cashGrab)
 		{
-			std::string rpath;
 			level_pool::RandMode randMode = level_pool::GetRandMode();
-			if (PoolRandPick(randMode, world, &rpath))
+			if (PoolRandPick(randMode, world, out))
 			{
-				reinterpret_cast<std::string*>(out)->assign(rpath);
-				mod::Log(levelCategory, "RAND mode={} world={}({}) num={} -> {}", static_cast<int>(randMode), worldType, world.type, num, rpath);
+				mod::Log(levelCategory, "RAND cashGrab={} world={}({}) num={} -> {}", static_cast<int>(randMode), worldType, world.type, num, out);
 				return;
 			}
 		}
@@ -283,44 +230,25 @@ static void GetLevelRemap(void* out, int worldType, int num, int pick, int mode)
 			mod::Log(levelCategory, "REMAP MISS - world={}({}) num={} - no slot (outside active pool)", worldType, world.type, num);
 			return;
 		}
-		char ident[48];
-		snprintf(ident, sizeof ident, "%s%d.tmx", world.name.c_str(), num);
-		if (strcmp(pf->name.c_str(), ident) == 0) return; /* identity: file IS slot num */
-		char np[192];
-		snprintf(np, sizeof np, "levels/versus/%s/%s", world.name.c_str(), pf->name.c_str());
-		reinterpret_cast<std::string*>(out)->assign(np, strlen(np));
-		mod::Log(levelCategory, "REMAP - world={}({}) slot={} {} -> {}", worldType, world.type, num, ident, pf->name.c_str());
+		const std::string ident = std::format("{}{}.tmx", world.name, num);
+		if (pf->name == ident) return; /* identity: file IS slot num */
+		out = std::format("levels/versus/{}/{}", world.name, pf->name);
+		mod::Log(levelCategory, "REMAP - world={}({}) slot={} {} -> {}", worldType, world.type, num, ident, pf->name);
 	}
 }
 
-static void* GetLevelHook(void* out, int worldType, int num, char mode)
+static void GetLevelPathHook(std::string* out, int worldType, int levelNum, bool cashGrab)
 {
-	assert(getLevelOrig);
-	void* ret = getLevelOrig(out, worldType, num, mode);
+	assert(getLevelPathOrig);
+	getLevelPathOrig(out, worldType, levelNum, cashGrab);
+	ApplyLevelPoolRename(*out, worldType, levelNum, cashGrab);
 
-	/* probe: pick context FUN_14026B9C0 refreshes before the chain. */
-	uintptr_t b = reinterpret_cast<uintptr_t>(ad2::ad2Module);
-	int pick = *(volatile int32_t*) (b + 0x5B9FF0); /* DAT_1405b9ff0 */
-	int cnt = *(volatile int32_t*) (b + 0x5DE56C); /* DAT_1405de56c (d3) */
-	int spec = -1;
-	if (*(volatile int8_t*) (b + 0x5DE607)) /* DAT_1405de607 */
-		spec = (int) *(volatile int32_t*) (b + 0x5DE480); /* DAT_1405de480 */
-	else
-	{
-		uintptr_t s = *(volatile uintptr_t*) (b + 0x5DE9C8); /* singleton */
-		if (s >= 0x10000) spec = (int) *(volatile int32_t*) (s + 0x45C);
-	}
-	GetLevelRemap(out, worldType, num, pick, mode); /* slot -> file (stage 2); logs on rewrite/miss */
-	char path[160];
-	PeekStdString(out, path, sizeof(path)); /* post-rewrite: the final path */
-	mod::Log(levelCategory, "world={}({}) num={} mode={} pick={} spec={} cnt={} path=\"{}\" ret={} ra0={}",
-	         worldType, ext::enchantum::cast_or(worldType, ad2::WorldType::Invalid), num, (int) mode, pick, spec, cnt, path, ret,
-	         ad2::MemoryOffset{GetCallerReturnAddress()});
-	return ret;
+	mod::Log(levelCategory, "world={}({}) num={} cashGrab={} path=\"{}\" caller={}",
+	         worldType, ext::enchantum::cast_or(worldType, ad2::WorldType::Invalid), levelNum, cashGrab, *out, ad2::MemoryOffset{GetCallerReturnAddress()});
 }
 
 template <typename T>
-bool HookGameFunction(const ad2::MemoryOffset& target, T hook, T& original, const std::string& name)
+bool HookGameFunction(const ad2::MemoryOffsetOfType<T>& target, T* hook, T*& original, const std::string& name)
 {
 	LPVOID targetAddress = target.ToAddress();
 	LPVOID hookAddress = reinterpret_cast<LPVOID>(hook);
@@ -349,6 +277,6 @@ bool hooks::game::InstallHooks()
 		return false;
 	}
 
-	return HookGameFunction(ad2::addresses::getLevel, GetLevelHook, getLevelOrig, NAME_OF(ad2::functions::GetLevel)) &&
-		HookGameFunction(ad2::addresses::getWorldData, GetWorldDataHook, getWorldDataOrig, NAME_OF(ad2::functions::GetWorldData()));
+	return HookGameFunction(ad2::addresses::getLevelPath, GetLevelPathHook, getLevelPathOrig, NAME_OF(ad2::addresses::getLevelPath)) &&
+		HookGameFunction(ad2::addresses::getWorldData, GetWorldDataHook, getWorldDataOrig, NAME_OF(ad2::addresses::getWorldData));
 }

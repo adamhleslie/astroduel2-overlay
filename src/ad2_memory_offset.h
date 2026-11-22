@@ -88,18 +88,20 @@ namespace ad2
 	};
 
 	template<typename T>
-	struct TypedMemoryOffset : MemoryOffset
+	struct MemoryOffsetOfType : MemoryOffset
 	{
+		using Type = T;
 		using MemoryOffset::MemoryOffset;
 
 		T& operator*() const { return ToReference<T>(); }
 	};
 }
 
-template<>
-struct std::formatter<ad2::MemoryOffset> : std::formatter<std::string>
+template<typename T>
+	requires std::derived_from<T, ad2::MemoryOffset>
+struct std::formatter<T> : std::formatter<std::string>
 {
-	auto format(const ad2::MemoryOffset& address, std::format_context& ctx) const
+	auto format(const T& address, std::format_context& ctx) const
 	{
 		return std::formatter<string>::format(std::format("{:#010x}", address.offset), ctx);
 	}

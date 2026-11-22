@@ -1,13 +1,14 @@
 #pragma once
 
+#include "ad2_functions.h"
 #include "ad2_memory_offset.h"
 
 namespace ad2::addresses
 {
-	constexpr MemoryOffset getWorldData{0x2AE190}; // ad2::functions::GetWorldData
-	constexpr MemoryOffset getLevel{0x26C1C0}; // ad2::functions::GetLevel
+	constexpr MemoryOffsetOfType<decltype(functions::GetWorldData)> getWorldData{0x2AE190};
+	constexpr MemoryOffsetOfType<decltype(functions::GetLevelPath)> getLevelPath{0x26C1C0};
 
-	constexpr TypedMemoryOffset<int> versusMode{0x5B9FF0};
+	constexpr MemoryOffsetOfType<int> versusMode{0x5B9FF0};
 
 	constexpr MemoryOffset iatRegionStart{0x47e000};
 	constexpr MemoryOffset iatRegionEnd{0x495a00};
