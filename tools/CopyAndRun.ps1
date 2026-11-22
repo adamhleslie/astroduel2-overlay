@@ -61,12 +61,15 @@ Copy-Item -LiteralPath $CopySource -Destination $copyDest -Force
 Write-Host "Copied '$CopySource' -> '$copyDest'."
 
 # Copy the PDB
+$pdbDest = Join-Path $TargetPath $SteamPDB
 if (Test-Path -LiteralPath $CopySourcePDB -PathType Leaf) {
-    $pdbDest = Join-Path $TargetPath $SteamPDB
     Copy-Item -LiteralPath $CopySourcePDB -Destination $pdbDest -Force
     Write-Host "Copied '$CopySourcePDB' -> '$pdbDest'."
+} elseif (Test-Path -LiteralPath $pdbDest -PathType Leaf) {
+    Remove-Item -LiteralPath $pdbDest
+    Write-Host "PDB not found - deleted existing: $pdbDest"
 } else {
-    Write-Host "PDB not found - skipped: $CopySourcePDB"
+    Write-Host "PDB not found - skipped"
 }
 
 if (-not $NoRun) {
