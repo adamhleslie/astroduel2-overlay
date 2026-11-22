@@ -39,7 +39,7 @@ else ()
     message(WARNING "GAME_DIR is not set - the 'deploy' target is disabled.")
 endif ()
 
-set_property(TARGET steam_api64 PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL") # MSVC DLL
 target_compile_options(steam_api64 PRIVATE /W4 /utf-8)
+target_compile_options(steam_api64 PRIVATE $<$<CONFIG:RelWithDebInfo>:-UNDEBUG>) # Remove NDEBUG compile definition in RelWithDebInfo for assert support
 target_compile_definitions(steam_api64 PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN) # Windows header include options
 target_link_libraries(steam_api64 PRIVATE imgui::imgui minhook::minhook enchantum::enchantum SDL3::SDL3 opengl32 user32 gdi32 shell32 kernel32)
