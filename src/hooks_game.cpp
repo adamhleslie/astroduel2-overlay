@@ -248,7 +248,7 @@ static void GetLevelPathHook(std::string* out, int worldType, int levelNum, bool
 }
 
 template <typename T>
-bool HookGameFunction(const ad2::MemoryOffsetOfType<T>& target, T* hook, T*& original, const std::string& name)
+bool HookGameFunction(const ad2::MemoryOffset& target, T* hook, T*& original, const std::string& name)
 {
 	LPVOID targetAddress = target.ToAddress();
 	LPVOID hookAddress = reinterpret_cast<LPVOID>(hook);
