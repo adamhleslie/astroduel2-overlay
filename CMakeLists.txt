@@ -15,6 +15,7 @@ find_package(enchantum CONFIG REQUIRED)
 find_package(imgui CONFIG REQUIRED)
 find_package(SDL3 CONFIG REQUIRED)
 
+# TODO: Add VERSIONINFO resource script https://learn.microsoft.com/en-us/windows/win32/menurc/versioninfo-resource
 # Overlay -> steam_api64 proxy
 add_library(steam_api64 SHARED
     src/dllmain.cpp
