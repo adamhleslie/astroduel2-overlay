@@ -1,48 +1,39 @@
 # astroduel2-overlay
 
-In-game overlay DLL for **Astro Duel 2** (WREngine / cocos2d-x 3.17.x fork,
-SDL3). The overlay ships as a **`steam_api64.dll` proxy**: it replaces the
-game's Steam DLL, so the game loads it at import resolution — no
-launcher, no process injection, just a normal Steam launch.
+In-game overlay mod for [**Astro Duel 2**](https://store.steampowered.com/app/655350/Astro_Duel_2/) on Steam, Windows x64.
 
-- Loaded into the Steam-launched game at the main menu.
-- Worker thread (spawned from `DllMain`) waits for the game to settle, then
-  IAT-hooks `SDL_GL_SwapWindow` (IAT slot located by scanning the known IAT
-  region for the live `SDL3.dll` export address — the game's PE import data
-  is packer-forged, so no PE parsing).
-- The hook runs on the **game's render thread** — the right place for later
-  direct-call wiring (no cross-thread game-state races).
-- ImGui is lazy-initialized on first swap; desktop GL backend with the
-  bundled loader and `#version 120` GLSL for the game's GL 2.1-compat context.
-- Input: manual Win32 (GetCursorPos/ScreenToClient + GetAsyncKeyState), no
-  WndProc subclassing in v1.
-- **Toggle: `Ctrl+Alt+U`.**
-- Diagnostics: `%LOCALAPPDATA%\AstroDuel2Mod\probe_ui.log`
+### Features:
+- Custom level loading (Versus only)
+- Level pool management (Versus only)
+  - Custom level selection per-world
+  - New random level selection modes 
+
+## Installation
+TODO: Installer .ps1 script
+
+## Usage
+TODO: Demo gifs / screengrabs
+- Add custom .tmx level files to the existing resources folder location: `<AD2 Install Directory>\res\levels\versus\<world>`
+- Toggle Hotkey: Backtick / Grave **`**
+- Logs: `%LOCALAPPDATA%\AstroDuel2\overlay.log`
+
+## Tech
+The overlay ships as a `steam_api64.dll` proxy, replacing the game's Steam DLL, and re-routing
+function calls to the original Steam DLL renamed to `steam_api64_real.dll`. A worker thread
+spawned from `DllMain` waits for the game to unpack, then hooks the import address table and 
+various game functions.
 
 ## Build
-
-Prereqs: Visual Studio 2022 (C++ workload + CMake components, x64).
-CMake ≥ 3.25 — the copy bundled in VS 2022 is fine.
-
-Third-party dependencies come from [vcpkg](https://github.com/microsoft/vcpkg) in
-manifest mode — see `vcpkg.json`.
-
-Outputs: `build\Release\ad2ui.dll` and `build\Release\steam_api64.dll`
-(the same code; the Steam DLL export table comes from `src/steam_forwards.cpp`,
-built with `/G4` to match Steam's x64 ABI guard pages).
-
-## Use
-
-1. Back up the stock DLL: `D:\...\Astro Duel 2\steam_api64.dll`
-2. Copy `build\Release\steam_api64.dll` over it
-3. Launch the game through Steam as usual
-
-Then toggle with `Ctrl+Alt+U` in-game. (Restore the backup to go back to
-stock behavior.)
+Prereqs:
+- Visual Studio 2022
+- CMake ≥ 3.25
+- vcpkg (see `vcpkg.json`)
+  - Minhook
+  - imgui
+  - SDL3
+  - enum library
 
 ## Layout
-
-- `src/mod.cpp` — the overlay (IAT + MinHook hooks, ImGui init/UI, diagnostics)
 - `src/steam_forwards.cpp` — Steam export forwards for the `steam_api64.dll` proxy
 - `vcpkg.json` — dependency manifest
 
