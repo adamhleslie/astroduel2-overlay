@@ -47,7 +47,7 @@ stock behavior.)
 - `vcpkg.json` — dependency manifest
 
 ## LLM Disclaimer
-An LLM was used to generate code for the initial prototype, and for symbol naming in 
-the game's disassembly. All LLM usage was done with a locally running model (Qwen 3.8 27B).
-The initial prototype was completed with commit `c112a3b6a9fd39349880c1814f1d26fb7b8be8e1`,
-and all programming since has been done by hand.
+An LLM was used to generate code for the initial prototype, and to generate renamed symbols in 
+the Astro Duel 2 disassembly. All LLM usage was done with a locally running model (Qwen 3.8 27B).
+All programming since the initial prototype has been done by hand, following commit
+`c112a3b6a9fd39349880c1814f1d26fb7b8be8e1`.
