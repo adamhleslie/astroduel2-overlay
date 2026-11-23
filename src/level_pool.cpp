@@ -1,17 +1,18 @@
 #include "level_pool.h"
 
-#include "mod.h"
-#include "imgui.h"
-
 #include <cassert>
 #include <string>
 #include <vector>
 #include <algorithm>
 #include <filesystem>
+#include <random>
 #include <ranges>
 #include <shellapi.h>
 #include <enchantum/array.hpp>
+#include <imgui.h>
 
+#include "mod.h"
+#include "ad2_addresses.h"
 #include "extensions_enchantum.h"
 
 namespace
@@ -22,6 +23,7 @@ namespace
 	size_t selectedWorldIndex = 0;
 	bool isInitialized = false;
 	level_pool::RandMode randMode = level_pool::RandMode::Off;
+	std::mt19937 randEngine = std::mt19937{std::random_device{}()};
 
 	bool EqualsCaseInsensitive(const std::string& a, const std::string& b)
 	{
@@ -186,8 +188,9 @@ level_pool::World::World(std::string name, const std::vector<std::string>& level
 		levels[i] = Level
 		{
 			.name = levelName,
-			.gamePath = std::format("levels/versus/{}/{}", name, levelName),
+			.gamePath = std::format("levels/versus/{}/{}", this->name, levelName),
 			.active = true,
+			.defaultSlot = ExtractTmxNumber(this->name, levelName)
 		};
 	}
 
@@ -237,6 +240,37 @@ int level_pool::World::GetLevelCountForGame() const
 {
 	int activeLevelCount = GetActiveLevelCount();
 	return (activeLevelCount == 1) ? 2 : activeLevelCount;
+}
+
+std::optional<std::reference_wrapper<const level_pool::Level>> level_pool::World::GetLevelAtSlot(int slot) const
+{
+	int count = 0;
+	long long firstSlotIndex = -1;
+	for (const auto [i, level] : levels | std::ranges::views::enumerate)
+	{
+		if (level.slot == slot)
+		{
+			return level;
+		}
+
+		if (level.slot > 0)
+		{
+			++count;
+			if (level.slot == 1)
+			{
+				assert(firstSlotIndex == -1);
+				firstSlotIndex = i;
+			}
+		}
+	}
+
+	if (count == 1)
+	{
+		assert(firstSlotIndex != -1);
+		return levels[firstSlotIndex];
+	}
+
+	return std::nullopt;
 }
 
 #pragma endregion
@@ -355,9 +389,70 @@ void level_pool::Init()
 }
 
 bool level_pool::IsInitialized() { return isInitialized; }
-level_pool::RandMode level_pool::GetRandMode() { return randMode; }
 
-std::optional<std::reference_wrapper<const level_pool::World>> level_pool::GetWorldByType(ad2::WorldType type)
+std::optional<std::reference_wrapper<const level_pool::Level>> level_pool::GetRandomLevel(ad2::WorldType worldType)
+{
+	if (randMode == RandMode::Off)
+	{
+		return std::nullopt;
+	}
+
+	std::vector<std::reference_wrapper<const Level>> levels;
+	auto addLevels = [&levels](std::optional<std::reference_wrapper<const World>> worldOpt, bool activeOnly)
+	{
+		if (worldOpt)
+		{
+			const World& world = *worldOpt;
+			for (const Level& level : world.levels)
+			{
+				if (level.active || !activeOnly)
+				{
+					levels.emplace_back(level);
+				}
+			}
+		}
+	};
+
+	switch (randMode)
+	{
+		case RandMode::WorldActive:
+		{
+			addLevels(GetWorld(worldType), true);
+			break;
+		}
+		case RandMode::World:
+		{
+			addLevels(GetWorld(worldType), false);
+			break;
+		}
+		case RandMode::AnyActive:
+		{
+			for (ad2::WorldType worldTypeCustom : enchantum::values_generator<ad2::WorldType>)
+			{
+				addLevels(GetWorld(worldTypeCustom), true);
+			}
+			break;
+		}
+		case RandMode::Any:
+		{
+			for (ad2::WorldType worldTypeCustom : enchantum::values_generator<ad2::WorldType>)
+			{
+				addLevels(GetWorld(worldTypeCustom), false);
+			}
+			break;
+		}
+	}
+
+	if (levels.empty())
+	{
+		return std::nullopt;
+	}
+
+	std::uniform_int_distribution randDistribution{1, static_cast<int>(levels.size())};
+	return levels[randDistribution(randEngine)];
+}
+
+std::optional<std::reference_wrapper<const level_pool::World>> level_pool::GetWorld(ad2::WorldType type)
 {
 	if (enchantum::contains(type))
 	{
@@ -371,11 +466,11 @@ std::optional<std::reference_wrapper<const level_pool::World>> level_pool::GetWo
 	return std::nullopt;
 }
 
-std::optional<std::reference_wrapper<const level_pool::World>> level_pool::GetWorldByType(std::underlying_type_t<ad2::WorldType> underlyingType)
+std::optional<std::reference_wrapper<const level_pool::World>> level_pool::GetWorld(std::underlying_type_t<ad2::WorldType> underlyingType)
 {
 	if (auto typeOpt = enchantum::cast<ad2::WorldType>(underlyingType))
 	{
-		return GetWorldByType(*typeOpt);
+		return GetWorld(*typeOpt);
 	}
 
 	return std::nullopt;

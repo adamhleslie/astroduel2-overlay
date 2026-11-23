@@ -4,7 +4,6 @@
 #include <cstdio>
 #include <MinHook.h>
 #include <string>
-#include <vector>
 #include <enchantum/std_format.hpp>
 
 #include "ad2_addresses.h"
@@ -63,7 +62,7 @@ static void* GetWorldDataHook(void* out, int worldType)
 	int* f = (int*) r; /* f[0..3] = d0,d1,d2,d3 */
 	const int stock = f[3];
 	ad2::WorldType type = ext::enchantum::cast_or(worldType, ad2::WorldType::Invalid);
-	auto worldOpt = level_pool::GetWorldByType(type);
+	auto worldOpt = level_pool::GetWorld(type);
 	int override = (worldOpt ? worldOpt->get().GetActiveLevelCount() : 0);
 	if (override > 0) f[3] = override;
 	mod::Log(worldDataCategory, "world={}({}) out={} cnt={} (stock {}){} ra0={}",
@@ -72,174 +71,61 @@ static void* GetWorldDataHook(void* out, int worldType)
 	return r;
 }
 
-/* ------------------------------------------------------------------ */
-/* MinHook: LOG-ONLY hook on the level-string composer getLevelString */
-/* (0x14026C1C0: rcx=out std::string, rdx=world, r8=level num,        */
-/* r9=mode). EVERY level-load path composes its path here -- the whole*/
-/* binary has exactly 4 call sites:                                   */
-/*   0x140013d9e/0x140013e30   preload, in FUN_140013c00              */
-/*   0x140031456               versus pick path 0x140030ee0          */
-/*   0x14026cda2               alt cluster 0x14026cce0 (world global  */
-/*                             DAT_1405de550, num from obj+0x114),    */
-/*                             called from 0x14026b9c0/0x14026bf20    */
-/* ra0 tells which composer fired. Per call the hook also logs the    */
-/* pick context the picker refreshes before the chain -- pick         */
-/* (DAT_1405b9ff0: the versus game-mode enum), spec (the player-      */
-/* specified level: DAT_1405de480 when DAT_1405de607 is set, else     */
-/* singleton DAT_1405de9c8 + 0x45c) and cnt (DAT_1405de56c = the d3   */
-/* level count). Zero behavioral change.                              */
-/* ------------------------------------------------------------------ */
-
-/* Private PRNG (splitmix64) -- must NOT use srand/rand: the game imports
- * the CRT rand (IAT-verified) and its own randomization rides that single
- * shared generator; reseeding or consuming from it would perturb the
- * game's sequences. Only the game thread ever calls this. */
-static uint64_t rngState = 0;
-
-static int RandBelow(int n)
+static std::optional<std::reference_wrapper<const level_pool::Level>> GetCustomLevel(int worldType, int slot, bool cashGrab)
 {
-	if (!rngState)
-		rngState = (uint64_t) GetTickCount() ^ (uint64_t) (uintptr_t) &rngState;
-	uint64_t z = (rngState += 0x9E3779B97F4A7C15ULL);
-	z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL;
-	z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL;
-	return (int) ((z ^ (z >> 31)) % (uint64_t) n);
-}
-
-/* Random-map candidate pick for one PH/TA load. Returns false (caller runs
- * the normal slot/identity logic) for Off randMode or an empty candidate pool;
- * otherwise fills *levelPath with a uniformly random candidate's full relative
- * path ("levels/versus/<world>/<file>") -- the world in the path may differ
- * from the one being loaded (Any/AnyActive). */
-static bool PickRandomLevel(level_pool::RandMode randMode, const level_pool::World& world, std::string& levelPath)
-{
-	if (randMode == level_pool::RandMode::Off)
+	assert(level_pool::IsInitialized());
+	if (cashGrab || (*ad2::addresses::versusMode == ad2::VersusMode::CashGrab))
 	{
-		return false;
+		// Cash grab not supported
+		return std::nullopt;
 	}
 
-	// candidate = (world dir, file name) references into the cache; the relative path is built once, only for the picked entry.
-	std::vector<std::pair<const std::string*, const std::string*>> c;
-	auto addLevels = [&c](std::optional<std::reference_wrapper<const level_pool::World>> worldOpt, bool activeOnly)
-	{
-		if (worldOpt)
-		{
-			const level_pool::World& world = *worldOpt;
-			for (const level_pool::Level& level : world.levels)
-			{
-				if (!activeOnly || level.active)
-				{
-					c.emplace_back(&world.name, &level.name);
-				}
-			}
-		}
-	};
-
-	switch (randMode)
-	{
-		case level_pool::RandMode::WorldActive: addLevels(world, true);
-			break;
-		case level_pool::RandMode::World: addLevels(world, false);
-			break;
-		case level_pool::RandMode::AnyActive: for (ad2::WorldType worldType : enchantum::values_generator<ad2::WorldType>) addLevels(level_pool::GetWorldByType(worldType), true);
-			break;
-		case level_pool::RandMode::Any: for (ad2::WorldType worldType : enchantum::values_generator<ad2::WorldType>) addLevels(level_pool::GetWorldByType(worldType), false);
-			break;
-	}
-
-	if (!c.empty())
-	{
-		const auto& pick = c[RandBelow((int) c.size())];
-		levelPath = "levels/versus/" + *pick.first + "/" + *pick.second;
-		return true;
-	}
-
-	return false;
-}
-
-/* glv remap (stage 2): the composer built levels/versus/<world>/<world><levelNum>.tmx
-   with levelNum = pool slot (1..K, via the WdHook count). Rewrite the composed
-   string to the slot's actual .tmx per the live cache.
-   Guards, in order (each = silent no-op unless noted):
-	 versusMode == 3            cash grab -- composer ignores levelNum (cg_<world>.tmx);
-						  the 4th param is 0 in BOTH branches (proven in the
-						  caller FUN_140013c00: it sets DAT_1405b9ff0 but passes
-						  0); versusMode is the real discriminator
-	 world out of range   void/default/unknown are not pooled
-	 no slot == levelNum       outside the active pool (count grew) -> ERROR log
-	 name == <w><levelNum>.tmx identity -- the file IS its slot; no rewrite
-   Random-map cashGrab (randMode != 0) redirects the load to a uniformly
-   random candidate's full path BEFORE the slot lookup -- PH/TA loads only:
-   deathmatch (versusMode == 2, player-specified) and the deathmatch UI preview
-   (cashGrab == 1) keep the normal slot remap below; the 1/N identity versusMode is
-   negligible and rewrites anyway.
-   Deathmatch loads DO get the normal slot remap: the picker is bounded by
-   the WdHook count, so levelNum is in [1..K] and the table must stay total over
-   it (a player-specified level lands on a valid active map).
-   Rewrites via assign() on the game's 32-byte std::string: the overlay's
-   std::string is layout-identical (same MSVC 32-byte SSO-15: ptr/SSO@0x00,
-   len@0x10, cap@0x18, SSO sentinel 0xf, heap cap = len|0xf min 16 -- verified
-   against the game's own CtorCopy 0x140008700 / Dtor 0x140003000 and observed
-   live in the log: len=30, cap=31); shared UCRT process heap, so assign()
-   may realloc the slot's buffer safely. */
-static void RenameLevelPath(std::string& levelPath, int worldType, int levelNum, bool cashGrab)
-{
-	if (!level_pool::IsInitialized()) return;
-	if (cashGrab || (*ad2::addresses::versusMode == ad2::VersusMode::CashGrab)) return;
-
-	if (auto worldOpt = level_pool::GetWorldByType(worldType))
+	if (auto worldOpt = level_pool::GetWorld(worldType))
 	{
 		const level_pool::World& world = *worldOpt;
 
 		// If not deathmatch, apply custom randomization
 		if (*ad2::addresses::versusMode != ad2::VersusMode::Deathmatch)
 		{
-			level_pool::RandMode randMode = level_pool::GetRandMode();
-			if (PickRandomLevel(randMode, world, levelPath))
+			if (auto levelOpt = level_pool::GetRandomLevel(world.type))
 			{
-				mod::Log(levelCategory, "RAND randMode={} world={}({}) levelNum={} -> {}", randMode, worldType, world.type, levelNum, levelPath);
-				return;
+				const level_pool::Level& level = levelOpt.value();
+				mod::Log(levelCategory, "Random: {}", level.gamePath);
+				return levelOpt;
 			}
 		}
 
-		const level_pool::Level* pf = nullptr;
-		for (size_t j  = 0; j < world.levels.size(); j++)
-			if (world.levels[j].slot == levelNum)
+		if (auto levelOpt = world.GetLevelAtSlot(slot))
+		{
+			const level_pool::Level& level = levelOpt.value();
+			if (level.IsAtDefaultSlot())
 			{
-				pf = &world.levels[j];
-				break;
+				// No remap needed
+				return std::nullopt;
 			}
-		if (!pf)
-		{
-			/* single-map world: count is faked to 2, so levelNum may be 2 with only
-			   slot 1 populated -- resolve any in-range levelNum to the lone file */
-			int act = 0;
-			const level_pool::Level* only = nullptr;
-			for (const level_pool::Level& f: world.levels)
-				if (f.active)
-				{
-					act++;
-					only = &f;
-				}
-			if (act == 1) pf = only;
+
+			mod::Log(levelCategory, "Remap: world={}({}) slot={} -> {} | default={}", worldType, world.type, slot, level.name, level.defaultSlot);
+			return levelOpt;
 		}
-		if (!pf)
+		else
 		{
-			mod::Log(levelCategory, "REMAP MISS - world={}({}) levelNum={} - no slot (outside active pool)", worldType, world.type, levelNum);
-			return;
+			mod::Log(levelCategory, "Failed Remap: world={}({}) slot={} -> no slot (outside active pool)", worldType, world.type, slot);
+			return std::nullopt;
 		}
-		const std::string ident = std::format("{}{}.tmx", world.name, levelNum);
-		if (pf->name == ident) return; /* identity: file IS slot levelNum */
-		levelPath = std::format("levels/versus/{}/{}", world.name, pf->name);
-		mod::Log(levelCategory, "REMAP - world={}({}) slot={} {} -> {}", worldType, world.type, levelNum, ident, pf->name);
 	}
+
+	return std::nullopt;
 }
 
+// Replace the game's default level path composed string to the slot's actual .tmx per the live cache.
 static void GetLevelPathHook(std::string* levelPathOut, int worldType, int levelNum, bool cashGrab)
 {
 	assert(getLevelPathOrig);
 	getLevelPathOrig(levelPathOut, worldType, levelNum, cashGrab);
-	RenameLevelPath(*levelPathOut, worldType, levelNum, cashGrab);
+	if (auto levelOpt = GetCustomLevel(worldType, levelNum, cashGrab))
+	{
+		*levelPathOut = levelOpt->get().gamePath;
+	}
 
 	mod::Log(levelCategory, "world={}({}) num={} cashGrab={} path=\"{}\" caller={}",
 	         worldType, ext::enchantum::cast_or(worldType, ad2::WorldType::Invalid), levelNum, cashGrab, *levelPathOut, ad2::MemoryOffset{GetCallerReturnAddress()});

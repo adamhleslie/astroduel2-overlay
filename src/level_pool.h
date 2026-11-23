@@ -22,6 +22,9 @@ namespace level_pool
 		std::string gamePath;
 		bool active;
 		int slot;
+		int defaultSlot;
+
+		bool IsAtDefaultSlot() const { return (defaultSlot > 0) && (slot == defaultSlot); }
 	};
 
 	struct World
@@ -32,6 +35,8 @@ namespace level_pool
 		void SetAllLevelsActive(bool active);
 		int GetActiveLevelCount() const;
 		int GetLevelCountForGame() const;
+
+		std::optional<std::reference_wrapper<const Level>> GetLevelAtSlot(int slot) const;
 
 		ad2::WorldType type;
 		std::string name;
@@ -51,8 +56,9 @@ namespace level_pool
 	void DrawUi();
 
 	bool IsInitialized();
-	RandMode GetRandMode();
 
-	std::optional<std::reference_wrapper<const World>> GetWorldByType(ad2::WorldType type);
-	std::optional<std::reference_wrapper<const World>> GetWorldByType(std::underlying_type_t<ad2::WorldType> underlyingType);
+	std::optional<std::reference_wrapper<const Level>> GetRandomLevel(ad2::WorldType worldType);
+
+	std::optional<std::reference_wrapper<const World>> GetWorld(ad2::WorldType type);
+	std::optional<std::reference_wrapper<const World>> GetWorld(std::underlying_type_t<ad2::WorldType> underlyingType);
 }
