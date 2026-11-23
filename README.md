@@ -46,8 +46,8 @@ stock behavior.)
 - `src/steam_forwards.cpp` — Steam export forwards for the `steam_api64.dll` proxy
 - `vcpkg.json` — dependency manifest
 
-# LLM Disclaimer
-An LLM was used to generate the code for the initial prototype, and for symbol naming in 
+## LLM Disclaimer
+An LLM was used to generate code for the initial prototype, and for symbol naming in 
 the game's disassembly. All LLM usage was done with a locally running model (Qwen 3.8 27B).
-The initial prototype was copleted with commit `c112a3b6a9fd39349880c1814f1d26fb7b8be8e1`,
-and all programming since has been done by myself.
+The initial prototype was completed with commit `c112a3b6a9fd39349880c1814f1d26fb7b8be8e1`,
+and all programming since has been done by hand.
