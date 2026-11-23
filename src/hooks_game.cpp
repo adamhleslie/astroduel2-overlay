@@ -20,7 +20,6 @@ namespace
 	decltype(ad2::addresses::getWorldData)::Type* getWorldDataOrig = nullptr;
 	decltype(ad2::addresses::getLevelPath)::Type* getLevelPathOrig = nullptr;
 
-	// _ReturnAddress() replacement
 	void* GetCallerReturnAddress()
 	{
 		// Skip over the caller of this function, to their caller (the caller's call site)

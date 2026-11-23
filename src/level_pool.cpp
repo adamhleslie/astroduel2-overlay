@@ -18,12 +18,16 @@
 namespace
 {
 	constexpr std::string_view category = "level-pool";
+
+	bool isInitialized = false;
 	std::vector<level_pool::World> worlds;
 	enchantum::array<ad2::WorldType, size_t> worldIndexByType; // index into worlds, (size_t)-1 is invalid
+
+	// Options in overlay
 	size_t selectedWorldIndex = 0;
-	bool isInitialized = false;
 	level_pool::RandMode randMode = level_pool::RandMode::Off;
-	std::mt19937 randEngine = std::mt19937{std::random_device{}()};
+
+	std::mt19937 randEngine{std::random_device{}()};
 
 	bool EqualsCaseInsensitive(const std::string& a, const std::string& b)
 	{
