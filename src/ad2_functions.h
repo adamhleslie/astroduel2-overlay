@@ -5,5 +5,5 @@
 namespace ad2::functions
 {
 	void* GetWorldData(void* out, int worldType);
-	void GetLevelPath(std::string* out, int worldType, int levelNum, bool cashGrab);
+	void GetLevelPath(std::string* levelPathOut, int worldType, int levelNum, bool cashGrab);
 }

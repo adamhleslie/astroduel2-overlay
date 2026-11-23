@@ -8,7 +8,7 @@ namespace ad2::addresses
 	constexpr MemoryOffsetOfType<decltype(functions::GetWorldData)> getWorldData{0x2AE190};
 	constexpr MemoryOffsetOfType<decltype(functions::GetLevelPath)> getLevelPath{0x26C1C0};
 
-	constexpr MemoryOffsetOfType<int> versusMode{0x5B9FF0};
+	constexpr MemoryOffsetOfType<VersusMode> versusMode{0x5B9FF0};
 
 	constexpr MemoryOffset iatRegionStart{0x47e000};
 	constexpr MemoryOffset iatRegionEnd{0x495a00};

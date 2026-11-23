@@ -7,8 +7,25 @@
 // Astro Duel 2 base game content
 namespace ad2
 {
+	// AstroDuel2 executable module
+	extern HINSTANCE ad2Module;
+
+	// The game's resources directory ("Astro Duel 2/res")
+	extern std::filesystem::path resourcesPath;
+
+	void Init();
+
+#pragma region Types
 	constexpr int levelPoolCap = 12; // Maximum number of levels to select from in the versus level pool (Pilot Hunters / Team Annihilation)
 	constexpr int levelDeathmatchCap = 20; // Maximum number of levels shown in the deathmatch level select UI
+
+	enum class VersusMode
+	{
+		PilotHunters,
+		TeamAnnihilation,
+		Deathmatch,
+		CashGrab
+	};
 
 	// See enchantum traits below
 	enum class WorldType
@@ -31,14 +48,7 @@ namespace ad2
 		Up,
 		Unsorted,
 	};
-
-	// AstroDuel2 executable module
-	extern HINSTANCE ad2Module;
-
-	// The game's resources directory ("Astro Duel 2/res")
-	extern std::filesystem::path resourcesPath;
-
-	void Init();
+#pragma endregion
 }
 
 template<>

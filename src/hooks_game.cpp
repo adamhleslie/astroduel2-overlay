@@ -108,10 +108,10 @@ static int RandBelow(int n)
 
 /* Random-map candidate pick for one PH/TA load. Returns false (caller runs
  * the normal slot/identity logic) for Off randMode or an empty candidate pool;
- * otherwise fills *out with a uniformly random candidate's full relative
+ * otherwise fills *levelPath with a uniformly random candidate's full relative
  * path ("levels/versus/<world>/<file>") -- the world in the path may differ
  * from the one being loaded (Any/AnyActive). */
-static bool PoolRandPick(level_pool::RandMode randMode, const level_pool::World& world, std::string& out)
+static bool PickRandomLevel(level_pool::RandMode randMode, const level_pool::World& world, std::string& levelPath)
 {
 	if (randMode == level_pool::RandMode::Off)
 	{
@@ -150,31 +150,31 @@ static bool PoolRandPick(level_pool::RandMode randMode, const level_pool::World&
 	if (!c.empty())
 	{
 		const auto& pick = c[RandBelow((int) c.size())];
-		out = "levels/versus/" + *pick.first + "/" + *pick.second;
+		levelPath = "levels/versus/" + *pick.first + "/" + *pick.second;
 		return true;
 	}
 
 	return false;
 }
 
-/* glv remap (stage 2): the composer built levels/versus/<world>/<world><num>.tmx
-   with num = pool slot (1..K, via the WdHook count). Rewrite the composed
+/* glv remap (stage 2): the composer built levels/versus/<world>/<world><levelNum>.tmx
+   with levelNum = pool slot (1..K, via the WdHook count). Rewrite the composed
    string to the slot's actual .tmx per the live cache.
    Guards, in order (each = silent no-op unless noted):
-	 versusMode == 3            cash grab -- composer ignores num (cg_<world>.tmx);
+	 versusMode == 3            cash grab -- composer ignores levelNum (cg_<world>.tmx);
 						  the 4th param is 0 in BOTH branches (proven in the
 						  caller FUN_140013c00: it sets DAT_1405b9ff0 but passes
 						  0); versusMode is the real discriminator
 	 world out of range   void/default/unknown are not pooled
-	 no slot == num       outside the active pool (count grew) -> ERROR log
-	 name == <w><num>.tmx identity -- the file IS its slot; no rewrite
+	 no slot == levelNum       outside the active pool (count grew) -> ERROR log
+	 name == <w><levelNum>.tmx identity -- the file IS its slot; no rewrite
    Random-map cashGrab (randMode != 0) redirects the load to a uniformly
    random candidate's full path BEFORE the slot lookup -- PH/TA loads only:
    deathmatch (versusMode == 2, player-specified) and the deathmatch UI preview
    (cashGrab == 1) keep the normal slot remap below; the 1/N identity versusMode is
    negligible and rewrites anyway.
    Deathmatch loads DO get the normal slot remap: the picker is bounded by
-   the WdHook count, so num is in [1..K] and the table must stay total over
+   the WdHook count, so levelNum is in [1..K] and the table must stay total over
    it (a player-specified level lands on a valid active map).
    Rewrites via assign() on the game's 32-byte std::string: the overlay's
    std::string is layout-identical (same MSVC 32-byte SSO-15: ptr/SSO@0x00,
@@ -182,39 +182,37 @@ static bool PoolRandPick(level_pool::RandMode randMode, const level_pool::World&
    against the game's own CtorCopy 0x140008700 / Dtor 0x140003000 and observed
    live in the log: len=30, cap=31); shared UCRT process heap, so assign()
    may realloc the slot's buffer safely. */
-static void ApplyLevelPoolRename(std::string& out, int worldType, int num, bool cashGrab)
+static void RenameLevelPath(std::string& levelPath, int worldType, int levelNum, bool cashGrab)
 {
 	if (!level_pool::IsInitialized()) return;
-	if (*ad2::addresses::versusMode == 3) return; /* cash grab */
+	if (cashGrab || (*ad2::addresses::versusMode == ad2::VersusMode::CashGrab)) return;
 
 	if (auto worldOpt = level_pool::GetWorldByType(worldType))
 	{
 		const level_pool::World& world = *worldOpt;
 
-		/* random map selection -- PH/TA loads only (deathmatch and its UI
-		preview take the normal slot remap below). Off cashGrab or an empty
-		candidate pool: fall through. */
-		if (*ad2::addresses::versusMode != 2 && !cashGrab)
+		// If not deathmatch, apply custom randomization
+		if (*ad2::addresses::versusMode != ad2::VersusMode::Deathmatch)
 		{
 			level_pool::RandMode randMode = level_pool::GetRandMode();
-			if (PoolRandPick(randMode, world, out))
+			if (PickRandomLevel(randMode, world, levelPath))
 			{
-				mod::Log(levelCategory, "RAND cashGrab={} world={}({}) num={} -> {}", static_cast<int>(randMode), worldType, world.type, num, out);
+				mod::Log(levelCategory, "RAND randMode={} world={}({}) levelNum={} -> {}", randMode, worldType, world.type, levelNum, levelPath);
 				return;
 			}
 		}
 
 		const level_pool::Level* pf = nullptr;
-		for (size_t j = 0; j < world.levels.size(); j++)
-			if (world.levels[j].slot == num)
+		for (size_t j  = 0; j < world.levels.size(); j++)
+			if (world.levels[j].slot == levelNum)
 			{
 				pf = &world.levels[j];
 				break;
 			}
 		if (!pf)
 		{
-			/* single-map world: count is faked to 2, so num may be 2 with only
-			   slot 1 populated -- resolve any in-range num to the lone file */
+			/* single-map world: count is faked to 2, so levelNum may be 2 with only
+			   slot 1 populated -- resolve any in-range levelNum to the lone file */
 			int act = 0;
 			const level_pool::Level* only = nullptr;
 			for (const level_pool::Level& f: world.levels)
@@ -227,24 +225,24 @@ static void ApplyLevelPoolRename(std::string& out, int worldType, int num, bool 
 		}
 		if (!pf)
 		{
-			mod::Log(levelCategory, "REMAP MISS - world={}({}) num={} - no slot (outside active pool)", worldType, world.type, num);
+			mod::Log(levelCategory, "REMAP MISS - world={}({}) levelNum={} - no slot (outside active pool)", worldType, world.type, levelNum);
 			return;
 		}
-		const std::string ident = std::format("{}{}.tmx", world.name, num);
-		if (pf->name == ident) return; /* identity: file IS slot num */
-		out = std::format("levels/versus/{}/{}", world.name, pf->name);
-		mod::Log(levelCategory, "REMAP - world={}({}) slot={} {} -> {}", worldType, world.type, num, ident, pf->name);
+		const std::string ident = std::format("{}{}.tmx", world.name, levelNum);
+		if (pf->name == ident) return; /* identity: file IS slot levelNum */
+		levelPath = std::format("levels/versus/{}/{}", world.name, pf->name);
+		mod::Log(levelCategory, "REMAP - world={}({}) slot={} {} -> {}", worldType, world.type, levelNum, ident, pf->name);
 	}
 }
 
-static void GetLevelPathHook(std::string* out, int worldType, int levelNum, bool cashGrab)
+static void GetLevelPathHook(std::string* levelPathOut, int worldType, int levelNum, bool cashGrab)
 {
 	assert(getLevelPathOrig);
-	getLevelPathOrig(out, worldType, levelNum, cashGrab);
-	ApplyLevelPoolRename(*out, worldType, levelNum, cashGrab);
+	getLevelPathOrig(levelPathOut, worldType, levelNum, cashGrab);
+	RenameLevelPath(*levelPathOut, worldType, levelNum, cashGrab);
 
 	mod::Log(levelCategory, "world={}({}) num={} cashGrab={} path=\"{}\" caller={}",
-	         worldType, ext::enchantum::cast_or(worldType, ad2::WorldType::Invalid), levelNum, cashGrab, *out, ad2::MemoryOffset{GetCallerReturnAddress()});
+	         worldType, ext::enchantum::cast_or(worldType, ad2::WorldType::Invalid), levelNum, cashGrab, *levelPathOut, ad2::MemoryOffset{GetCallerReturnAddress()});
 }
 
 template <typename T>
