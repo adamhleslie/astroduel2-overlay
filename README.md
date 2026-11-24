@@ -9,9 +9,19 @@ In-game overlay mod for [**Astro Duel 2**](https://store.steampowered.com/app/65
   - New random level selection modes 
 
 ## Installation
-1. Get latest release
-2. TODO: Installer .ps1 script
-  - Installer script will fail if there is an Astro Duel 2 update that is not supported.
+### Installer
+1. Download and unzip latest release.
+2. Double click the Install.ps1 powershell script.
+3. Copy the path to your Astro Duel 2 install directory into the terminal.
+4. Press enter.
+   
+Note: The installer script will fail if Astro Duel 2 is not found, or is an unsupported version.
+
+### Manual
+1. Download and unzip latest release.
+2. Navigate to your Astro Duel 2 install directory.
+3. Rename the existing `steam_api64.dll` file in the Astro Duel directory to `steam_api64_real.dll`.
+4. Copy the mod's `steam_api64.dll` file into the Astro Duel directory.
 
 ## Usage
 TODO: Demo gifs / screengrabs
@@ -31,8 +41,8 @@ TODO: Demo gifs / screengrabs
   - enchantum
 
 ### CMake
-- `steam_api64` target builds the overlay mod / proxy dll.
-- `deploy` target builds `steam_api64`, and then deploys the built files to the game's install directory
+- `steam_api64`: builds the overlay mod / proxy dll.
+- `deploy`: builds `steam_api64`, and then deploys the built files to the game's install directory
 using [tools/CopyAndRun.ps1](tools/CopyAndRun.ps1).
   - The `deploy` target requires the CMake cache variable `GAME_DIR` to be defined. See
 [cmake -D](https://cmake.org/cmake/help/latest/manual/cmake.1.html#cmdoption-cmake-D).
@@ -47,7 +57,7 @@ For more info on the vcpkg integration, see [CMakePresets.json](CMakePresets.jso
 Minhook uses a custom overlay port implemented to build a static library. For more info, see [overlay-ports/minhook](overlay-ports/minhook)
 and [Overlay ports](https://learn.microsoft.com/en-us/vcpkg/concepts/overlay-ports).
 
-## Tech
+## Implementation
 This mod ships as a `steam_api64.dll` proxy, replacing the game's Steam DLL, and re-routing
 function calls to the original Steam DLL renamed to `steam_api64_real.dll`. A worker thread
 spawned from [`DllMain`](src/dllmain.cpp) waits for the game to unpack, then hooks the import address table and 
