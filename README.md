@@ -8,25 +8,16 @@ In-game overlay mod for [**Astro Duel 2**](https://store.steampowered.com/app/65
   - Custom level selection per-world
   - New random level selection modes 
 
-## Installation
-### Installer
-1. Download and unzip latest release.
-2. Double click the Install.ps1 powershell script.
-3. Copy the path to your Astro Duel 2 install directory into the terminal.
-4. Press enter.
-   
-Note: The installer script will fail if Astro Duel 2 is not found, or is an unsupported version.
+*TODO: Demo gifs / screengrabs*
 
-### Manual
-1. Download and unzip latest release.
-2. Navigate to your Astro Duel 2 install directory.
-3. Rename the existing `steam_api64.dll` file in the Astro Duel directory to `steam_api64_real.dll`.
-4. Copy the mod's `steam_api64.dll` file into the Astro Duel directory.
+## Installation
+See [latest release](https://github.com/adamhleslie/astroduel2-overlay/releases).
 
 ## Usage
-TODO: Demo gifs / screengrabs
+*TODO: Demo gifs / screengrabs*
+
 - Add custom .tmx level files to the existing resources folder location: `<AD2 Install Directory>\res\levels\versus\<world>`
-  - TODO: Add Astro Duel level editing guide
+  - *TODO: Add Astro Duel level editing guide*
 - Toggle Hotkey: ` (Backtick / Grave) 
 - Logs: `%LOCALAPPDATA%\AstroDuel2\overlay.log`
 
