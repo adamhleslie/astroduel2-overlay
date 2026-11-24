@@ -49,6 +49,7 @@ namespace mod
 	}
 
 	template<typename... Args>
+#pragma warning(suppress: 4100)
 	void LogVerbose(std::string_view category, std::format_string<Args...> fmt, Args&&... args)
 	{
 		if constexpr (verboseLoggingEnabled)

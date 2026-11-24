@@ -22,7 +22,7 @@ namespace
 // Thread creation in DllMain is risky, so we indirectly start our mod's worker thread via an intermediary, without blocking on the initial DLL_PROCESS_ATTACH thread
 // https://devblogs.microsoft.com/oldnewthing/20070904-00/?p=25283/
 //		Note: This doesn't seem strictly necessary, but for now leaving it in until the alternative is tested more thoroughly
-BOOL WINAPI DllMain(HINSTANCE hinstDll, DWORD fdwReason, LPVOID lpvReserved)
+BOOL WINAPI DllMain(HINSTANCE hinstDll, DWORD fdwReason, LPVOID)
 {
 	if (fdwReason == DLL_PROCESS_ATTACH)
 	{
