@@ -3,7 +3,7 @@
     Sets up the AstroDuel2 Overlay mod, and runs the game.
 
 .DESCRIPTION
-    .\script.ps1 "<Astro Duel 2 Directory>" [-Configuration <RelWithDebInfo|Release>] [-NoRun]
+    .\CopyAndRun.ps1 "<Astro Duel 2 Directory>" [-Configuration <RelWithDebInfo|Release>] [-NoRun]
 #>
 
 param(
