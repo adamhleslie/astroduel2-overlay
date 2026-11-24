@@ -35,7 +35,7 @@ if (GAME_DIR)
         COMMAND pwsh -NoProfile -File "${CMAKE_CURRENT_SOURCE_DIR}/tools/CopyAndRun.ps1" "${GAME_DIR}" -Configuration $<CONFIG> -NoRun
         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
         USES_TERMINAL
-        COMMENT "Deploying steam_api64.dll (+ .pdb) to the game directory")
+        COMMENT "Deploying steam_api64.dll to the game directory")
 else ()
     message(WARNING "GAME_DIR is not set - the 'deploy' target is disabled.")
 endif ()
