@@ -15,7 +15,7 @@ namespace ad2
 
 	void Init();
 
-#pragma region Types
+#pragma region Game Data / Types
 	constexpr int levelPoolCap = 12; // Maximum number of levels to select from in the versus level pool (Pilot Hunters / Team Annihilation)
 	constexpr int levelDeathmatchCap = 20; // Maximum number of levels shown in the deathmatch level select UI
 
@@ -48,6 +48,16 @@ namespace ad2
 		Up,
 		Unsorted,
 	};
+
+	struct WorldData
+	{
+		int data0;
+		int data1;
+		int data3;
+		int levelCount;
+	};
+	static_assert((sizeof(WorldData) == 16), "WorldData must be 16 bytes");
+
 #pragma endregion
 }
 

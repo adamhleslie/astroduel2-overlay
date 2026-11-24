@@ -130,7 +130,10 @@ void mod::Main()
 	}
 
 	// Install Import Address Table hooks
-	hooks::iat::InstallHooks();
+	if constexpr (verboseLoggingEnabled)
+	{
+		hooks::iat::InstallHooks();
+	}
 
 	// Install game hooks
 	hooks::game::InstallHooks();
