@@ -2,20 +2,18 @@
 
 In-game overlay mod for [**Astro Duel 2**](https://store.steampowered.com/app/655350/Astro_Duel_2/) on Steam, Windows x64.
 
+https://github.com/user-attachments/assets/cd3e5dc1-9c64-4f78-b78c-04d70daa6089
+
 ### Features:
 - Custom level loading (Versus only)
 - Level pool management (Versus only)
   - Custom level selection per-world
   - New random level selection modes 
 
-*TODO: Demo gifs / screengrabs*
-
 ## Installation
 See [latest release](https://github.com/adamhleslie/astroduel2-overlay/releases).
 
 ## Usage
-*TODO: Demo gifs / screengrabs*
-
 - Add custom .tmx level files to the existing resources folder location: `<AD2 Install Directory>\res\levels\versus\<world>`
   - *TODO: Add Astro Duel level editing guide*
 - Toggle Hotkey: ` (Backtick / Grave) 
