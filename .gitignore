@@ -1,5 +1,6 @@
 # CMake build tree
 /build/
+/install/
 *.user
 *.obj
 *.exp
