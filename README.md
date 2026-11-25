@@ -15,7 +15,7 @@ See [latest release](https://github.com/adamhleslie/astroduel2-overlay/releases)
 
 ## Usage
 - Add custom .tmx level files to the existing resources folder location: `<AD2 Install Directory>\res\levels\versus\<world>`
-  - *TODO: Add Astro Duel level editing guide*
+  - For info on creating custom levels, see the wiki's [Astro Duel 2 Map Creation](https://github.com/adamhleslie/astroduel2-overlay/wiki/Astro-Duel-2-Map-Creation)
 - Toggle Hotkey: ` (Backtick / Grave) 
 - Logs: `%LOCALAPPDATA%\AstroDuel2\overlay.log`
 
