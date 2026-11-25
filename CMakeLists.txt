@@ -74,4 +74,4 @@ install(CODE [[
     else ()
         message(WARNING "Install not supported on non-Release build")
     endif ()
-]] CONFIGURATIONS Release)
+]])
