@@ -52,7 +52,23 @@ if (CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     set(CACHE{CMAKE_INSTALL_PREFIX} TYPE PATH HELP "Install prefix" FORCE VALUE "${CMAKE_CURRENT_SOURCE_DIR}/install")
 endif ()
 
+# Generate license file for dependencies
+set(license_file "${CMAKE_CURRENT_BINARY_DIR}/THIRD_PARTY_NOTICES.txt")
+file(WRITE "${license_file}" "")
+set(vcpkg_ports "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share")
+set(vcpkg_redistributed_packages minhook enchantum imgui)
+foreach (package IN LISTS vcpkg_redistributed_packages)
+    file (READ "${vcpkg_ports}/${package}/copyright" copyright)
+    file (APPEND "${license_file}"
+        "================================================================================\n"
+        "${package}\n"
+        "================================================================================\n"
+        "${copyright}\n"
+    )
+endforeach ()
+
 install(TARGETS steam_api64 RUNTIME DESTINATION "package" CONFIGURATIONS Release)
+install(FILES "${license_file}" DESTINATION "package" CONFIGURATIONS Release)
 install(PROGRAMS "tools/packaging/Install.ps1" DESTINATION "package" CONFIGURATIONS Release)
 
 # Archive contents of the package directory
