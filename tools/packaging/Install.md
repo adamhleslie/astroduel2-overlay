@@ -3,9 +3,8 @@
 #### Installer
 If you can run PowerShell scripts:
 1. Download and unzip.
-2. Run the `Install.ps1` PowerShell script.
-   1. In Windows 11, right click and select "Run with PowerShell".
-3. Copy the path to your Astro Duel 2 install directory into the terminal.
+2. Right-click the `Install.ps1` PowerShell script and select "Run with PowerShell".
+3. Copy the full path to your Astro Duel 2 install directory into the terminal.
 4. Press enter.
 
 Note: To enable running PowerShell scripts, open PowerShell and run the command `Set-ExecutionPolicy Bypass -Scope CurrentUser`.
