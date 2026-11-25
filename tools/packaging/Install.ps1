@@ -30,6 +30,7 @@ function Test-FileHash {
     $actualHash = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
     if ($actualHash -ne $ExpectedHash) {
         Write-Error "'$displayName' hash mismatch. Expected: $ExpectedHash != Found: $actualHash"
+        pause
         exit 1
     }
 }
@@ -37,6 +38,7 @@ function Test-FileHash {
 # Validate path
 if (-not (Test-Path -LiteralPath $TargetPath -PathType Container)) {
     Write-Error "Not a valid directory: $TargetPath"
+    pause
     exit 1
 }
 $TargetPath = (Resolve-Path -LiteralPath $TargetPath).Path
@@ -46,6 +48,7 @@ Write-Host "Working in: $TargetPath"
 $exePath = Join-Path $TargetPath $Executable
 if (-not (Test-Path -LiteralPath $exePath)) {
     Write-Error "Executable not found: $exePath"
+    pause
     exit 1
 }
 Test-FileHash $exePath $ExecutableHash
@@ -54,6 +57,7 @@ Test-FileHash $exePath $ExecutableHash
 $sdlPath = Join-Path $TargetPath $SDLDLL
 if (-not (Test-Path -LiteralPath $sdlPath)) {
     Write-Error "SDL DLL not found: $sdlPath"
+    pause
     exit 1
 }
 Test-FileHash $sdlPath $SDLDLLHash
@@ -64,6 +68,7 @@ $renameDst = Join-Path $TargetPath $SteamDLLRename
 if (-not (Test-Path -LiteralPath $renameDst)) {
     if (-not (Test-Path -LiteralPath $renameSrc)) {
         Write-Error "File to rename not found: $renameSrc"
+        pause
         exit 1
     }
 
@@ -83,8 +88,11 @@ if (-not (Test-Path -LiteralPath $renameDst)) {
 $copySource = $SteamDLL
 if (-not (Test-Path -LiteralPath $copySource -PathType Leaf)) {
     Write-Error "Copy source not found: $copySource"
+    pause
     exit 1
 }
 $copyDest = Join-Path $TargetPath $SteamDLL
 Copy-Item -LiteralPath $copySource -Destination $copyDest -Force
 Write-Host "Copied '$copySource' -> '$copyDest'."
+Write-Host "Install complete."
+pause
