@@ -1,7 +1,7 @@
 # astroduel2-overlay - in-game ImGui overlay DLL (steam_api64.dll proxy) for Astro Duel 2
 cmake_minimum_required(VERSION 3.25)
 project(astroduel2-overlay VERSION 1.0.0 LANGUAGES C CXX)
-set(project_version_suffix "-beta2")
+set(project_version_suffix "")
 set(project_name_versioned "AstroDuel2-Overlay_${PROJECT_VERSION}${project_version_suffix}")
 
 set(CMAKE_CXX_STANDARD 23)
@@ -9,6 +9,10 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 if (NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "Expected 64 bit, but CMAKE_SIZEOF_VOID_P is ${CMAKE_SIZEOF_VOID_P}")
+endif ()
+
+if (NOT MSVC)
+    message(FATAL_ERROR "Must be built with MSVC for ABI compatibility")
 endif ()
 
 # Find cmake config packages for dependencies
@@ -47,47 +51,31 @@ else ()
     message(WARNING "GAME_DIR is not set - the 'deploy' target is disabled.")
 endif ()
 
+# Generate license file for dependencies
+set(license_file_deps "${CMAKE_CURRENT_BINARY_DIR}/THIRD_PARTY_NOTICES.txt")
+file(WRITE "${license_file_deps}" "")
+set(vcpkg_ports "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share")
+set(vcpkg_redistributed_packages minhook enchantum imgui)
+foreach (package IN LISTS vcpkg_redistributed_packages)
+    file (READ "${vcpkg_ports}/${package}/copyright" copyright)
+    file (APPEND "${license_file_deps}"
+        "====================================\n"
+        "License notice for ${package}\n"
+        "====================================\n"
+        "${copyright}\n"
+    )
+endforeach ()
+
 # Install into local directory for packaging, unless user specified location
 if (CMAKE_INSTALL_PREFIX_INITIALIZED_TO_DEFAULT)
     set(CACHE{CMAKE_INSTALL_PREFIX} TYPE PATH HELP "Install prefix" FORCE VALUE "${CMAKE_CURRENT_SOURCE_DIR}/install")
 endif ()
 
-# Generate license file for dependencies
-set(license_file "${CMAKE_CURRENT_BINARY_DIR}/THIRD_PARTY_NOTICES.txt")
-file(WRITE "${license_file}" "")
-set(vcpkg_ports "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}/share")
-set(vcpkg_redistributed_packages minhook enchantum imgui)
-foreach (package IN LISTS vcpkg_redistributed_packages)
-    file (READ "${vcpkg_ports}/${package}/copyright" copyright)
-    file (APPEND "${license_file}"
-        "================================================================================\n"
-        "${package}\n"
-        "================================================================================\n"
-        "${copyright}\n"
-    )
-endforeach ()
-
+install(FILES "${license_file_deps}" DESTINATION "package" CONFIGURATIONS Release)
 install(TARGETS steam_api64 RUNTIME DESTINATION "package" CONFIGURATIONS Release)
-install(FILES "${license_file}" DESTINATION "package" CONFIGURATIONS Release)
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE.txt" DESTINATION "package" CONFIGURATIONS Release)
 install(PROGRAMS "tools/packaging/Install.ps1" DESTINATION "package" CONFIGURATIONS Release)
 
-# Archive contents of the package directory
-install(CODE "set(project_name_versioned ${project_name_versioned})")
-install(CODE [[
-    if ($<CONFIG:Release>)
-        file(SHA256 "${CMAKE_INSTALL_PREFIX}/package/steam_api64.dll" steam_api64.dll_sha256)
-        file(SHA256 "${CMAKE_INSTALL_PREFIX}/package/Install.ps1" Install.ps1_sha256)
-        string(TOUPPER ${steam_api64.dll_sha256} steam_api64.dll_sha256)
-        string(TOUPPER ${Install.ps1_sha256} Install.ps1_sha256)
-        configure_file("../tools/packaging/Install.md" "${CMAKE_INSTALL_PREFIX}/package/README.md" NEWLINE_STYLE CRLF)
-        file(GLOB archive_files LIST_DIRECTORIES true RELATIVE "${CMAKE_INSTALL_PREFIX}/package" "${CMAKE_INSTALL_PREFIX}/package/*")
-        file(ARCHIVE_CREATE
-            OUTPUT "${CMAKE_INSTALL_PREFIX}/${project_name_versioned}.zip"
-            PATHS ${archive_files}
-            WORKING_DIRECTORY "${CMAKE_INSTALL_PREFIX}/package"
-            FORMAT zip
-        )
-    else ()
-        message(WARNING "Install not supported on non-Release build")
-    endif ()
-]])
+# Configure the install script and run it to archive the package directory
+configure_file("tools/packaging/Install.cmake.in" "Install.cmake" @ONLY)
+install(SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/Install.cmake")

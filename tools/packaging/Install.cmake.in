@@ -1,0 +1,18 @@
+# install time script for packaging files
+if (CMAKE_INSTALL_CONFIG_NAME STREQUAL "Release")
+    file(SHA256 "${CMAKE_INSTALL_PREFIX}/package/steam_api64.dll" steam_api64.dll_sha256)
+    file(SHA256 "${CMAKE_INSTALL_PREFIX}/package/Install.ps1" Install.ps1_sha256)
+    string(TOUPPER ${steam_api64.dll_sha256} steam_api64.dll_sha256)
+    string(TOUPPER ${Install.ps1_sha256} Install.ps1_sha256)
+    set(project_name_versioned "@project_name_versioned@")
+    configure_file("@CMAKE_CURRENT_SOURCE_DIR@/tools/packaging/Install.md" "${CMAKE_INSTALL_PREFIX}/package/README.md" NEWLINE_STYLE CRLF)
+    file(GLOB archive_files LIST_DIRECTORIES true RELATIVE "${CMAKE_INSTALL_PREFIX}/package" "${CMAKE_INSTALL_PREFIX}/package/*")
+    file(ARCHIVE_CREATE
+        OUTPUT "${CMAKE_INSTALL_PREFIX}/${project_name_versioned}.zip"
+        PATHS ${archive_files}
+        WORKING_DIRECTORY "${CMAKE_INSTALL_PREFIX}/package"
+        FORMAT zip
+    )
+else ()
+    message(WARNING "Install not supported on non-Release build")
+endif ()
