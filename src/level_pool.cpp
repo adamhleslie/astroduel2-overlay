@@ -326,7 +326,7 @@ void level_pool::DrawUi()
 		}
 
 		// World selection dropdown
-		if (ImGui::BeginCombo("##world", selectedWorld.name.c_str()))
+		if (ImGui::BeginCombo("##world", selectedWorld.name.c_str(), ImGuiComboFlags_HeightLargest))
 		{
 			for (const auto [i, world] : worlds | std::ranges::views::enumerate)
 			{
