@@ -5,6 +5,7 @@
 #include <vector>
 #include <algorithm>
 #include <filesystem>
+#include <functional>
 #include <random>
 #include <ranges>
 #include <shellapi.h>
@@ -172,7 +173,7 @@ namespace
 	{
 		for (level_pool::World& world : worlds)
 		{
-			world.SetAllLevelsActive(active);
+			world.SetLevelsActive(active);
 		}
 
 		mod::Log(category, "{} all worlds -- count={} applied to every world", active ? "RESET" : "CLEAR", active);
@@ -223,7 +224,7 @@ int level_pool::World::UpdateSlots()
 	return slotCount;
 }
 
-void level_pool::World::SetAllLevelsActive(bool active)
+void level_pool::World::SetLevelsActive(bool active)
 {
 	for (Level& level : levels)
 	{
@@ -234,20 +235,46 @@ void level_pool::World::SetAllLevelsActive(bool active)
 	mod::Log(category, "{} set all levels {}", name, active ? "active" : "inactive");
 }
 
-void level_pool::World::SetCustomLevelsActive(bool active)
+void level_pool::World::SetLevelsActive(std::function<bool(const Level&, size_t)> activeCallback)
 {
-	int customLevelCount = 0;
-	for (Level& level : levels)
+	int activeCount = 0;
+	int inactiveCount = 0;
+	for (const auto [i, level] : levels | std::ranges::views::enumerate)
 	{
-		if (level.defaultSlot == -1)
+		level.active = activeCallback(level, i);
+		if (level.active)
 		{
-			level.active = active;
-			++customLevelCount;
+			++activeCount;
+		}
+		else
+		{
+			++inactiveCount;
 		}
 	}
 
 	UpdateSlots();
-	mod::Log(category, "{} set {} custom levels {}", name, customLevelCount, active ? "active" : "inactive");
+	mod::Log(category, "{} set {} levels active, {} levels inactive", name, activeCount, inactiveCount);
+}
+
+void level_pool::World::SetLevelsActive(bool active, std::function<bool(const Level&, size_t)> shouldModifyCallback)
+{
+	int modifiedCount = 0;
+	for (const auto [i, level] : levels | std::ranges::views::enumerate)
+	{
+		if (shouldModifyCallback(level, i))
+		{
+			level.active = active;
+			++modifiedCount;
+		}
+	}
+
+	UpdateSlots();
+	mod::Log(category, "{} set {} levels {}", name, modifiedCount, active ? "active" : "inactive");
+}
+
+void level_pool::World::SetCustomLevelsActive(bool active)
+{
+	SetLevelsActive(active, [](const Level& level, size_t) { return level.defaultSlot == -1; });
 }
 
 int level_pool::World::GetActiveLevelCount() const
@@ -370,11 +397,20 @@ void level_pool::DrawUi()
 		ImGui::Spacing();
 
 		ImGui::BeginChild("##files", ImVec2{0, 0}, ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY | ImGuiChildFlags_NavFlattened);
-		for (Level& level : selectedWorld.levels)
+		for (const auto [i, level] : selectedWorld.levels | std::ranges::views::enumerate)
 		{
 			if (ImGui::Checkbox(level.name.c_str(), &level.active))
 			{
 				selectedWorld.UpdateSlots();
+			}
+			if (ImGui::BeginPopupContextItem(nullptr, ImGuiPopupFlags_MouseButtonRight))
+			{
+				if (ImGui::Button("Select Exclusive"))
+				{
+					selectedWorld.SetLevelsActive(std::function{[i](const Level&, size_t index) { return index == i;}});
+					ImGui::CloseCurrentPopup();
+				}
+				ImGui::EndPopup();
 			}
 			ImGui::SameLine();
 			ImGui::TextDisabled("%s", level.gamePath.c_str());
@@ -401,7 +437,7 @@ void level_pool::DrawUi()
 
 		if (ImGui::Button("Select All"))
 		{
-			selectedWorld.SetAllLevelsActive(true);
+			selectedWorld.SetLevelsActive(true);
 		}
 		ImGui::SameLine();
 		if (ImGui::Button("Select Custom"))
@@ -411,7 +447,7 @@ void level_pool::DrawUi()
 		ImGui::SameLine();
 		if (ImGui::Button("Clear Selection"))
 		{
-			selectedWorld.SetAllLevelsActive(false);
+			selectedWorld.SetLevelsActive(false);
 		}
 	}
 }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -32,7 +33,9 @@ namespace level_pool
 		World(std::string name, const std::vector<std::string>& levelNames);
 
 		int UpdateSlots();
-		void SetAllLevelsActive(bool active);
+		void SetLevelsActive(bool active);
+		void SetLevelsActive(std::function<bool(const Level&, size_t)> activeCallback);
+		void SetLevelsActive(bool active, std::function<bool(const Level&, size_t)> shouldModifyCallback);
 		void SetCustomLevelsActive(bool active);
 		int GetActiveLevelCount() const;
 		int GetLevelCountForGame() const;
