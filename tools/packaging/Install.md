@@ -13,7 +13,7 @@ Note: The installer script will fail if a compatible version of Astro Duel 2 is 
 #### Manual
 1. Download and unzip.
 2. Navigate to your Astro Duel 2 install directory.
-3. Rename the existing `steam_api64.dll` file in the Astro Duel 2 directory to `steam_api64_real.dll`.
+3. Rename the existing `steam_api64.dll` file in the Astro Duel 2 directory to `steam_api64Hooked.dll`.
 4. Copy the mod's `steam_api64.dll` file into the Astro Duel 2 directory.
 
 ### Checksum

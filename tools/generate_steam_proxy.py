@@ -11,7 +11,7 @@ import argparse
 import pefile
 
 DEFAULT_OUTPUT_FILE = "steam_forwards.inc"
-DEFAULT_FORWARD_TARGET = "steam_api64_real"
+DEFAULT_FORWARD_TARGET = "steam_api64Hooked"
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="")

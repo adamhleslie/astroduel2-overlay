@@ -13,7 +13,7 @@ param(
 
 # Options:
 $SteamDLL       = "steam_api64.dll"
-$SteamDLLRename = "steam_api64_real.dll"
+$SteamDLLRename = "steam_api64Hooked.dll"
 $Executable     = "AstroDuel2.exe"
 $SDLDLL         = "SDL3.dll"
 $SteamDLLHash   = "E082BF5C9F881C822B1540A76B74F9D15E18019A73EBD206A559595BADCB7F65"

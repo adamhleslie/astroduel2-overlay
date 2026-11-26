@@ -19,7 +19,7 @@ param(
 
 # Options:
 $SteamDLL       = "steam_api64.dll"
-$SteamDLLRename = "steam_api64_real.dll"
+$SteamDLLRename = "steam_api64Hooked.dll"
 $SteamPDB       = "steam_api64.pdb"
 $CopySource     = "build\$Configuration\$SteamDLL"
 $CopySourcePDB  = "build\$Configuration\$SteamPDB"
