@@ -1,7 +1,7 @@
 # astroduel2-overlay - in-game ImGui overlay DLL (steam_api64.dll proxy) for Astro Duel 2
 cmake_minimum_required(VERSION 3.25)
-project(astroduel2-overlay VERSION 1.0.0 LANGUAGES C CXX)
-set(project_version_suffix "")
+project(astroduel2-overlay VERSION 1.0.1 LANGUAGES C CXX)
+set(project_version_suffix "-beta")
 set(project_name_versioned "AstroDuel2-Overlay_${PROJECT_VERSION}${project_version_suffix}")
 
 set(CMAKE_CXX_STANDARD 23)
