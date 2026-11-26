@@ -33,6 +33,7 @@ namespace level_pool
 
 		int UpdateSlots();
 		void SetAllLevelsActive(bool active);
+		void SetCustomLevelsActive(bool active);
 		int GetActiveLevelCount() const;
 		int GetLevelCountForGame() const;
 

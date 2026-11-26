@@ -38,7 +38,7 @@ namespace
 	}
 
 	// Extracts the trailing number of a map filename for the specified world ("mines12.tmx" -> 12), -1 if none
-	int ExtractTmxNumber(const std::string& worldName, const std::string& filename)
+	int GetDefaultLevelNumber(const std::string& worldName, const std::string& filename)
 	{
 		size_t stemEnd = filename.rfind('.');
 		if (stemEnd == std::string::npos)
@@ -72,8 +72,8 @@ namespace
 	// Prioritizes map names in the form of "<worldName><#>.tmx", comparing their #. Otherwise direct string comparison.
 	bool MapFilenameComparator(const std::string& worldName, const std::string& a, const std::string& b)
 	{
-		int na = ExtractTmxNumber(worldName, a);
-		int nb = ExtractTmxNumber(worldName, b);
+		int na = GetDefaultLevelNumber(worldName, a);
+		int nb = GetDefaultLevelNumber(worldName, b);
 		if ((na < 0) != (nb < 0)) return na >= 0;
 		if (na != nb) return na < nb;
 		return a < b;
@@ -168,12 +168,21 @@ namespace
 		mod::Log(category, "{} worlds found under {}", worldCount, versusLevelsPath.string());
 	}
 
-	// Set every level to an active state and applies in one shot
 	void SetAllLevelsActive(bool active)
 	{
 		for (level_pool::World& world : worlds)
 		{
 			world.SetAllLevelsActive(active);
+		}
+
+		mod::Log(category, "{} all worlds -- count={} applied to every world", active ? "RESET" : "CLEAR", active);
+	}
+
+	void SetCustomLevelsActive(bool active)
+	{
+		for (level_pool::World& world : worlds)
+		{
+			world.SetCustomLevelsActive(active);
 		}
 
 		mod::Log(category, "{} all worlds -- count={} applied to every world", active ? "RESET" : "CLEAR", active);
@@ -194,7 +203,7 @@ level_pool::World::World(std::string name, const std::vector<std::string>& level
 			.name = levelName,
 			.gamePath = std::format("levels/versus/{}/{}", this->name, levelName),
 			.active = true,
-			.defaultSlot = ExtractTmxNumber(this->name, levelName)
+			.defaultSlot = GetDefaultLevelNumber(this->name, levelName)
 		};
 	}
 
@@ -223,6 +232,22 @@ void level_pool::World::SetAllLevelsActive(bool active)
 
 	UpdateSlots();
 	mod::Log(category, "{} set all levels {}", name, active ? "active" : "inactive");
+}
+
+void level_pool::World::SetCustomLevelsActive(bool active)
+{
+	int customLevelCount = 0;
+	for (Level& level : levels)
+	{
+		if (level.defaultSlot == -1)
+		{
+			level.active = active;
+			++customLevelCount;
+		}
+	}
+
+	UpdateSlots();
+	mod::Log(category, "{} set {} custom levels {}", name, customLevelCount, active ? "active" : "inactive");
 }
 
 int level_pool::World::GetActiveLevelCount() const
@@ -307,6 +332,11 @@ void level_pool::DrawUi()
 			SetAllLevelsActive(true);
 		}
 		ImGui::SameLine();
+		if (ImGui::Button("Select All Custom"))
+		{
+			SetCustomLevelsActive(true);
+		}
+		ImGui::SameLine();
 		if (ImGui::Button("Clear All Worlds"))
 		{
 			SetAllLevelsActive(false);
@@ -372,6 +402,11 @@ void level_pool::DrawUi()
 		if (ImGui::Button("Select All"))
 		{
 			selectedWorld.SetAllLevelsActive(true);
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Select Custom"))
+		{
+			selectedWorld.SetCustomLevelsActive(true);
 		}
 		ImGui::SameLine();
 		if (ImGui::Button("Clear Selection"))
