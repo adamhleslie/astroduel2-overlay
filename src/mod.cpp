@@ -96,7 +96,7 @@ namespace
 			}
 		}
 
-		mod::detail::logStream.open(logFilePath, std::ofstream::out | std::ofstream::app);
+		mod::detail::logStream.open(logFilePath, std::ofstream::out | std::ofstream::trunc);
 		return mod::detail::logStream.is_open();
 	}
 }
