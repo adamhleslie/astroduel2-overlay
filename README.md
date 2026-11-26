@@ -2,7 +2,7 @@
 
 In-game overlay mod for [**Astro Duel 2**](https://store.steampowered.com/app/655350/Astro_Duel_2/) on Steam, Windows x64.
 
-https://github.com/user-attachments/assets/cd3e5dc1-9c64-4f78-b78c-04d70daa6089
+<img width="852" height="422" alt="image" src="https://github.com/user-attachments/assets/f31a7562-0d99-4e35-bfc3-3cb36c493e2d" />
 
 ### Features:
 - Custom level loading (Versus only)
@@ -18,6 +18,8 @@ See [latest release](https://github.com/adamhleslie/astroduel2-overlay/releases)
   - For info on creating custom levels, see the wiki's [Astro Duel 2 Map Creation](https://github.com/adamhleslie/astroduel2-overlay/wiki/Astro-Duel-2-Map-Creation)
 - Toggle Hotkey: ` (Backtick / Grave) 
 - Logs: `%LOCALAPPDATA%\AstroDuel2\overlay.log`
+
+https://github.com/user-attachments/assets/cd3e5dc1-9c64-4f78-b78c-04d70daa6089
 
 ## Build
 ### Requirements
